@@ -89,7 +89,7 @@ Please file a bug report including the stack trace.
    [nil "--initial-data DICT" "set root element (must be a dict)"]
    [nil "--include-path PATH" "template lookup path"]
    [nil "--output-dir DIR" "output directory"]
-   [nil "--formats FORMATS" "generated output formats (depx: runtime include trace)" :default "pan,dep"]
+   [nil "--formats FORMATS" "generated output formats (depx/depx.gz: runtime include trace)" :default "pan,dep"]
    [nil "--java-opts OPTS" "options for JVM"]
    [nil "--max-iteration LIMIT" "set max. no. of iterations" :default "10000"]
    [nil "--max-recursion LIMIT" "set max. depth of recursion" :default "50"]

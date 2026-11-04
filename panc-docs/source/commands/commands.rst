@@ -76,7 +76,7 @@ reorganized and simplified options, replaces the older ``panc`` command.
 ``--formats=``
     A comma separated list of desired output formats. Allowed values are
     "pan", "pan.gz", "xml", "xml.gz", "json", "json.gz", "txt", "dep", "dep.gz",
-    "depx" and "dot". The default value is "pan,dep". See
+    "depx", "depx.gz" and "dot". The default value is "pan,dep". See
     :ref:`depx-output` for the extended dependency trace.
 
 ``--java-opts=``
@@ -146,8 +146,13 @@ trace and the complete file dependency set. For example::
 
     panc --formats pan,depx profiles/example.pan
 
-The existing ``dep`` output and default formats are unchanged. There is no
-compressed ``depx`` format. Collection is enabled only when a selected
+Select ``depx.gz`` for a gzip-compressed ``.depx.gz`` file with the same
+UTF-8 content, streamed directly without an intermediate uncompressed file::
+
+    panc --formats pan,depx.gz profiles/example.pan
+
+The existing ``dep`` output and default formats are unchanged.
+Collection is enabled only when a selected
 formatter requests it. Within each profile, metadata shares existing template
 and source-location references, while occurrence indexes, parents and statuses
 use primitive arrays. Storage grows with encountered occurrences, not merely

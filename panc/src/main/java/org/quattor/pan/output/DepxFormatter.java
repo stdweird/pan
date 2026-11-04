@@ -9,11 +9,15 @@ import org.quattor.pan.ttemplate.IncludeTrace;
 import org.quattor.pan.ttemplate.Template;
 
 /** Version 1 runtime include trace with separate complete file dependencies. */
-public final class DepxFormatter extends AbstractFormatter {
+public class DepxFormatter extends AbstractFormatter {
     private static final DepxFormatter INSTANCE = new DepxFormatter();
 
     private DepxFormatter() {
-        super("depx", "depx");
+        this("depx", "depx");
+    }
+
+    protected DepxFormatter(String suffix, String key) {
+        super(suffix, key);
     }
 
     /** Returns the shared formatter. */

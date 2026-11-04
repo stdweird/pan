@@ -44,6 +44,7 @@ import org.quattor.pan.exceptions.EvaluationException;
 import org.quattor.pan.exceptions.SyntaxException;
 import org.quattor.pan.output.DepFormatter;
 import org.quattor.pan.output.DepxFormatter;
+import org.quattor.pan.output.DepxGzipFormatter;
 import org.quattor.pan.output.DepGzipFormatter;
 import org.quattor.pan.output.DotFormatter;
 import org.quattor.pan.output.Formatter;
@@ -488,6 +489,8 @@ public class CompilerOptions {
                 formatters.add(DepFormatter.getInstance());
             } else if ("depx".equals(fname)) {
                 formatters.add(DepxFormatter.getInstance());
+            } else if ("depx.gz".equals(fname)) {
+                formatters.add(DepxGzipFormatter.getInstance());
             } else if ("dep.gz".equals(fname)) {
                 formatters.add(DepGzipFormatter.getInstance());
             } else if ("null".equals(fname)) {

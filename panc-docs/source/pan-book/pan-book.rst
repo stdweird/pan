@@ -160,7 +160,8 @@ in which the element names are the pan primitive types and the name
 attribute corresponds to the name of the field in the pan template.
 
 Dependency output is separate from the generated configuration. The default
-``dep`` format lists dependency files; the optional ``depx`` format also records
+``dep`` format lists dependency files; the optional ``depx`` (or gzip-compressed
+``depx.gz``) format also records
 runtime include order, callers and repeated unique-template suppression. See
 :ref:`depx-output` for selection and trace interpretation.
 

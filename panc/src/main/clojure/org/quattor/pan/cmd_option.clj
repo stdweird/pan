@@ -12,6 +12,7 @@
             XmlGzipFormatter
             DepFormatter
             DepxFormatter
+            DepxGzipFormatter
             DepGzipFormatter
             NullFormatter]
            [org.quattor.pan CompilerOptions$DeprecationWarnings]
@@ -40,6 +41,7 @@
             "xml.gz" (conj v (XmlGzipFormatter/getInstance))
             "dep" (conj v (DepFormatter/getInstance))
             "depx" (conj v (DepxFormatter/getInstance))
+            "depx.gz" (conj v (DepxGzipFormatter/getInstance))
             "dep.gz" (conj v (DepGzipFormatter/getInstance))
             "null" (conj v (NullFormatter/getInstance))
             "none" v
