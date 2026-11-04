@@ -75,8 +75,9 @@ reorganized and simplified options, replaces the older ``panc`` command.
 
 ``--formats=``
     A comma separated list of desired output formats. Allowed values are
-    "pan", "pan.gz", "xml", "xml.gz", "json", "json.gz", "txt", "dep", "dep.gz"
-    and "dot". The default is value is "pan,dep".
+    "pan", "pan.gz", "xml", "xml.gz", "json", "json.gz", "txt", "dep", "dep.gz",
+    "depx" and "dot". The default value is "pan,dep". See
+    :ref:`depx-output` for the extended dependency trace.
 
 ``--java-opts=``
     List of options to use when starting the java virtual machine. These
@@ -133,6 +134,76 @@ the command is invoked without options and just a list of object
 templates as the arguments. Larger sets of templates will need to set
 the memory option for the Java Virtual Machine; this should be done
 through the ``--java-opts`` option.
+
+
+.. _depx-output:
+
+Extended dependency traces (depx)
+=================================
+
+Select ``depx`` to write a ``.depx`` file containing the runtime include
+trace and the complete file dependency set. For example::
+
+    panc --formats pan,depx profiles/example.pan
+
+The existing ``dep`` output and default formats are unchanged. There is no
+compressed ``depx`` format. Collection is enabled only when a selected
+formatter requests it. Within each profile, metadata shares existing template
+and source-location references, while occurrence indexes, parents and statuses
+use primitive arrays. Storage grows with encountered occurrences, not merely
+with the number of distinct templates.
+
+Only successfully resolved, type-valid named includes encountered during
+evaluation are recorded, including computed names and validation-time execution.
+Untaken branches and includes evaluating to ``null`` or ``undef`` produce no
+occurrence. Repeated ordinary includes retain their own occurrences and children.
+Later references to already loaded unique or declaration templates are marked
+``skipped-unique`` or ``skipped-declaration`` and have no synthetic descendants.
+An include inside a skipped template is not encountered again.
+
+Structure template invocations are labeled ``create``, not ``include``. The
+caller identifies the executing template, including a function's defining
+template when applicable; this is not a general function-call trace. Reachable
+external object profiles have separate sections, not fabricated include edges.
+The final dependency section preserves the same complete file set as ``dep``,
+including dependencies that are not represented by include occurrences.
+
+Version 1 text format
+---------------------
+
+Records use LF line endings. The first line is ``depx 1``. Profile sections
+are sorted by profile name; site indexes and occurrence indexes are local to
+each profile and assigned in encounter order. A schematic section is::
+
+    depx 1
+    profile "example"
+      site 0 caller="example" target="common" caller-path="/templates/example.pan" target-path="/templates/common.pan" location=2.1-2.17
+      occurrences
+        include 0 site=0 caller="example" target="common" location=2.1-2.17 status=executed
+    dependencies
+      file "/templates/common.pan"
+      file "/templates/example.pan"
+
+Each ``site`` record contains the caller and target names, resolved source
+paths and statement location. Paths occur in site metadata rather than on
+every occurrence line. ``location`` uses
+``beginLine.beginColumn-endLine.endColumn``. Missing metadata is the bare token
+``null``.
+
+After ``occurrences``, each record begins with ``include`` or ``create``, its
+occurrence index and ``site=<index>``. Caller, target, location and status
+follow in the order shown above. Root occurrences have four leading spaces;
+each enclosing occurrence adds two spaces. Status is ``executed``,
+``skipped-unique``, ``skipped-declaration`` or ``create``. Indentation expresses
+occurrence nesting, not a deduplicated template graph.
+
+The ``dependencies`` section follows all profile sections. Its ``file``
+records have two leading spaces and use the same ordering as ``dep``.
+Names and paths are double-quoted strings. Backslash, double quote, newline,
+carriage return and tab are escaped as ``\\\\``, ``\\\"``, ``\\n``, ``\\r`` and
+``\\t`` respectively; other ISO control characters use lowercase four-digit
+``\\uXXXX`` escapes. Other characters are preserved. A quoted ``"null"``
+is a string, distinct from missing metadata.
 
 
 panc-annotations
@@ -455,4 +526,3 @@ the activity on each thread.
     plot(stop/1000,thread, type="n", xlab="time (s)", ylab="thread ID")
     segments(start/1000, thread, stop/1000, thread)
     detach(tstats)
-

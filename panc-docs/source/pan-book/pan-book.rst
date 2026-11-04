@@ -159,6 +159,11 @@ format is not specified, the default is the "pan" XML style shown above,
 in which the element names are the pan primitive types and the name
 attribute corresponds to the name of the field in the pan template.
 
+Dependency output is separate from the generated configuration. The default
+``dep`` format lists dependency files; the optional ``depx`` format also records
+runtime include order, callers and repeated unique-template suppression. See
+:ref:`depx-output` for selection and trace interpretation.
+
 The pan compiler can generate output in three additional formats: json,
 text, and dot. The following shows the output for the json format that
 was written to the ``hello_world.json`` file.
