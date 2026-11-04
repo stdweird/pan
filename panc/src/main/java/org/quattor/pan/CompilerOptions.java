@@ -43,6 +43,7 @@ import org.quattor.pan.exceptions.ConfigurationException;
 import org.quattor.pan.exceptions.EvaluationException;
 import org.quattor.pan.exceptions.SyntaxException;
 import org.quattor.pan.output.DepFormatter;
+import org.quattor.pan.output.DepxFormatter;
 import org.quattor.pan.output.DepGzipFormatter;
 import org.quattor.pan.output.DotFormatter;
 import org.quattor.pan.output.Formatter;
@@ -485,6 +486,8 @@ public class CompilerOptions {
                 formatters.add(XmlGzipFormatter.getInstance());
             } else if ("dep".equals(fname)) {
                 formatters.add(DepFormatter.getInstance());
+            } else if ("depx".equals(fname)) {
+                formatters.add(DepxFormatter.getInstance());
             } else if ("dep.gz".equals(fname)) {
                 formatters.add(DepGzipFormatter.getInstance());
             } else if ("null".equals(fname)) {
@@ -495,6 +498,16 @@ public class CompilerOptions {
         }
 
         return formatters;
+    }
+
+    /** Enables collection only when a selected formatter needs runtime occurrences. */
+    public boolean requiresIncludeTrace() {
+        for (Formatter formatter : formatters) {
+            if (formatter.requiresIncludeTrace()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

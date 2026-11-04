@@ -8,6 +8,7 @@
                                    DotFormatter
                                    PanFormatter
                                    DepFormatter
+                                   DepxFormatter
                                    NullFormatter]
            [org.quattor.pan CompilerOptions$DeprecationWarnings]
            [java.util.regex Pattern]
@@ -23,6 +24,8 @@
     (is (= 1 (count unknown)))))
 
 (deftest test-formats
+  (is (= #{(DepxFormatter/getInstance)} (:formatter (process [:formats "depx"]))))
+  (is (.requiresIncludeTrace (DepxFormatter/getInstance)))
   (let [pandep (process [:formats "pan,dep"])
         text (process [:formats "text"])
         json (process [:formats "json"])

@@ -23,6 +23,8 @@ package org.quattor.pan.tasks;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.Set;
 import java.util.Stack;
 import java.util.TreeSet;
@@ -31,6 +33,7 @@ import org.quattor.pan.Compiler;
 import org.quattor.pan.cache.Valid2Cache;
 import org.quattor.pan.dml.data.Element;
 import org.quattor.pan.repository.SourceFile;
+import org.quattor.pan.ttemplate.IncludeTrace;
 
 /**
  * Encapsulates the results of the second validation phase.
@@ -47,6 +50,7 @@ public class FinalResult extends TaskResult {
 	public final String objectName;
 
 	Set<SourceFile> dependencies;
+    private final Map<String, IncludeTrace> includeTraces;
 
 	public FinalResult(Compiler compiler, Valid2Result result) {
 		super(ResultType.VALID2);
@@ -54,7 +58,12 @@ public class FinalResult extends TaskResult {
 		this.root = result.getRoot();
 		this.timestamp = result.timestamp;
 		this.objectName = result.objectName;
-		this.dependencies = resolveAllDependencies(compiler);
+        Map<String, IncludeTrace> traces = new TreeMap<String, IncludeTrace>();
+        if (result.getIncludeTrace() != null) {
+            traces.put(objectName, result.getIncludeTrace());
+        }
+		this.dependencies = resolveAllDependencies(compiler, traces);
+        this.includeTraces = Collections.unmodifiableMap(traces);
 	}
 
 	public Element getRoot() {
@@ -65,7 +74,16 @@ public class FinalResult extends TaskResult {
 		return dependencies;
 	}
 
+    /** Returns immutable post-validation traces keyed by separate object profile name. */
+    public Map<String, IncludeTrace> getIncludeTraces() {
+        return includeTraces;
+    }
+
 	public Set<SourceFile> resolveAllDependencies(Compiler compiler) {
+        return resolveAllDependencies(compiler, null);
+    }
+
+    private Set<SourceFile> resolveAllDependencies(Compiler compiler, Map<String, IncludeTrace> traces) {
 
 		Set<SourceFile> allDependencies = new TreeSet<SourceFile>();
 
@@ -90,6 +108,9 @@ public class FinalResult extends TaskResult {
 							.waitForResult(objectToProcess);
 
 					allDependencies.addAll(result.getDependencies());
+                    if (traces != null && result.getIncludeTrace() != null) {
+                        traces.put(objectToProcess, result.getIncludeTrace());
+                    }
 
 					unprocessed.addAll(result.getObjectDependencies());
 				}
