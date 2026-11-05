@@ -7,7 +7,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const zlib = require("node:zlib");
 
-const htmlPath = path.join(__dirname, "..", "index.html");
+const htmlPath = path.join(__dirname, "..", "depviewer.html");
 const html = fs.readFileSync(htmlPath, "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 vm.runInThisContext(script, { filename: htmlPath });
@@ -188,6 +188,85 @@ test("decompresses gzip JSON locally, enforces size limits, and reports invalid 
   assert.equal(await readFile(file("trace.depx.json.gz", gzip)), json);
   await assert.rejects(readFile(file("huge.json", Buffer.from("{}"), 128 * 1024 * 1024 + 1)), /128 MiB/);
   await assert.rejects(readFile(file("invalid.json.gz", Buffer.from([0x1f, 0x8b, 0, 0]))), /decompress/);
+});
+
+test("automatically loads HTTP JSON and gzip traces through the shared file reader", async () => {
+  const json = JSON.stringify(fixture());
+  const cases = [
+    ["trace café.depx.json", Buffer.from(json)],
+    ["trace space.depx.json.gz", zlib.gzipSync(Buffer.from(json))]
+  ];
+  for (const [filename, bytes] of cases) {
+    let requestedPath;
+    let loadedDocument;
+    let reportedError;
+    class TestFile {
+      constructor(parts, name) {
+        this.name = name;
+        this.bytes = Buffer.concat(parts.map((part) => Buffer.from(part)));
+        this.size = this.bytes.length;
+      }
+      async arrayBuffer() { return this.bytes.buffer.slice(this.bytes.byteOffset, this.bytes.byteOffset + this.bytes.byteLength); }
+    }
+    const handled = await globalThis.DepxViewerParser.loadAutomaticTrace({
+      protocol: "http:",
+      hash: `#filename=${encodeURIComponent(filename)}`,
+      fetchTrace: async (relativePath) => {
+        requestedPath = relativePath;
+        return { ok: true, headers: { get: () => String(bytes.length) }, body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) };
+      },
+      FileConstructor: TestFile,
+      loadFile: async (file) => {
+        assert.equal(file.name, filename);
+        assert.deepEqual(file.bytes, bytes, "the fetched trace bytes are passed through unchanged");
+        loadedDocument = parseDepx(await readFile(file));
+      },
+      reportError: (message) => { reportedError = message; }
+    });
+    assert.equal(handled, true);
+    assert.equal(requestedPath, "trace");
+    assert.equal(loadedDocument.profiles.size, 1);
+    assert.equal(reportedError, undefined);
+  }
+});
+
+test("HTTP autoload errors are reported, declared oversize is rejected before reading, and file URLs do not fetch", async () => {
+  let fetchCalls = 0;
+  const errors = [];
+  const options = {
+    protocol: "http:", hash: "#filename=trace.depx.json", FileConstructor: class TestFile {},
+    loadFile: async () => assert.fail("a failed automatic load must not reach the file reader"),
+    reportError: (message) => errors.push(message)
+  };
+  await globalThis.DepxViewerParser.loadAutomaticTrace({
+    ...options,
+    fetchTrace: async () => { fetchCalls++; throw new Error("offline"); }
+  });
+  assert.match(errors[0], /offline/);
+  await globalThis.DepxViewerParser.loadAutomaticTrace({
+    ...options,
+    fetchTrace: async () => ({ ok: true, headers: { get: () => String(128 * 1024 * 1024 + 1) }, body: { getReader: () => assert.fail("oversize body must not be read") } })
+  });
+  assert.match(errors[1], /128 MiB/);
+  let streamCanceled = false;
+  await globalThis.DepxViewerParser.loadAutomaticTrace({
+    ...options,
+    fetchTrace: async () => ({
+      ok: true, headers: { get: () => null },
+      body: { getReader: () => ({
+        read: async () => ({ done: false, value: new Uint8Array(128 * 1024 * 1024 + 1) }),
+        cancel: async () => { streamCanceled = true; },
+        releaseLock: () => {}
+      }) }
+    })
+  });
+  assert.equal(streamCanceled, true);
+  assert.match(errors[2], /128 MiB/);
+  const handled = await globalThis.DepxViewerParser.loadAutomaticTrace({
+    ...options, protocol: "file:", fetchTrace: async () => { fetchCalls++; }
+  });
+  assert.equal(handled, false);
+  assert.equal(fetchCalls, 1);
 });
 
 test("consumes compiler-generated depx JSON and matching gzip output", async (t) => {

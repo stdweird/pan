@@ -288,10 +288,24 @@ include files that do not correspond to an include occurrence.
 Offline trace viewer
 --------------------
 
-Open ``panc/viewer/index.html`` from a checkout directly in a browser, then
-select a ``.depx.json`` or ``.depx.json.gz`` file. The
-standalone page needs no server, installation, or network connection and does
-not upload trace data. It accepts JSON schema version 1 only; existing text
+Run ``depviewer path/to/profile.depx.json`` (or ``.depx.json.gz``) to open the
+viewer with the supplied trace already loaded. From a checkout, the launcher is
+``panc/src/main/scripts/depviewer/depviewer``; compiler bundles install it as
+``bin/depviewer/depviewer``.
+It requires Python 3.9 or newer and ``xdg-open``. Its helper and
+``depviewer.html`` must remain
+beside the launcher, but the command can run from any working directory.
+
+The launcher serves only the viewer and selected trace on a token-protected
+loopback address; it does not upload data or create a temporary trace copy.
+Keep the command running while using the viewer, and press Ctrl+C to stop the
+server. Browser reloads require the server to remain running.
+
+Alternatively, open ``panc/src/main/scripts/depviewer/depviewer.html`` directly
+in a browser
+and select a local file using the picker. This standalone mode needs no server,
+installation, or network connection. The viewer accepts JSON schema version 1
+only; existing text
 ``.depx`` and ``.depx.gz`` files remain compiler-supported but cannot be opened
 in this viewer. Regenerate those traces using a JSON output format.
 

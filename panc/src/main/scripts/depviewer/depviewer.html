@@ -207,7 +207,7 @@
       return [site.caller, site.target, site.callerPath, site.targetPath, occurrence.location, occurrence.status, statusLabel(occurrence.status)].join(" ").toLocaleLowerCase();
     }
     if (typeof document === "undefined") {
-      globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel, searchableText };
+       globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, readResponseFile, loadAutomaticTrace, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel, searchableText };
       return;
     }
     const state = { document: null, profile: null, allVisible: [], visible: [], matches: [], matchIndex: -1, selected: null, expanded: new Set(), collapsedSearchBranches: new Set(), rowByIndex: new Map(), treePage: 0, dependencyPage: 0, searchQuery: null };
@@ -224,6 +224,14 @@
       ui.status.textContent = message;
       ui.status.classList.toggle("error", isError);
       ui.status.setAttribute("role", isError ? "alert" : "status");
+    }
+
+    function showLoadError(message) {
+      state.document = null; state.profile = null; state.selected = null;
+      ui.search.disabled = true; ui.expand.disabled = true; ui.collapse.disabled = true; ui.profileControl.hidden = true;
+      ui.tree.replaceChildren(makeElement("div", "empty", message));
+      ui.details.replaceChildren(makeElement("p", "hint", "Correct the file or choose another depx trace to continue."));
+      updateSearchControls(); setStatus(message, true);
     }
 
     function parseDepx(text) {
@@ -398,6 +406,47 @@
       catch { throw new Error("This file is not valid UTF-8 text."); }
     }
 
+    async function readResponseFile(response, filename, FileConstructor) {
+      if (!response.ok) throw new Error(`Could not load ${filename} (HTTP ${response.status}).`);
+      const declaredSize = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredSize) && declaredSize > MAX_INPUT_BYTES) {
+        throw new Error("This file is larger than the 128 MiB safety limit. Use a smaller trace or split the output.");
+      }
+      if (!response.body) throw new Error("Could not load this trace because the browser cannot stream the response.");
+      const reader = response.body.getReader();
+      const chunks = [];
+      let totalBytes = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_INPUT_BYTES) {
+            await reader.cancel();
+            throw new Error("This file is larger than the 128 MiB safety limit. Use a smaller trace or split the output.");
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      return new FileConstructor(chunks, filename, { type: "application/octet-stream" });
+    }
+
+    async function loadAutomaticTrace({ protocol, hash, fetchTrace, FileConstructor, loadFile, reportError }) {
+      if (protocol !== "http:" && protocol !== "https:") return false;
+      const filename = new URLSearchParams(hash.replace(/^#/, "")).get("filename");
+      if (!filename) return false;
+      try {
+        const response = await fetchTrace("trace");
+        const file = await readResponseFile(response, filename, FileConstructor);
+        await loadFile(file);
+      } catch (error) {
+        reportError(error instanceof Error ? error.message : "Unable to load this trace.");
+      }
+      return true;
+    }
+
     function currentProfile() { return state.document && state.document.profiles.get(state.profile); }
 
     function makeElement(tag, className, text) {
@@ -570,10 +619,9 @@
     }
 
     ui.open.addEventListener("click", () => ui.input.click());
-      ui.input.addEventListener("change", async () => {
-      const file = ui.input.files && ui.input.files[0];
+    async function loadFile(file) {
       if (!file) return;
-      setStatus(`Reading ${file.name} locally…`);
+      setStatus(`Reading ${file.name}…`);
       try {
         const parsed = parseDepx(await readFile(file));
         state.document = parsed; state.profile = parsed.profiles.keys().next().value; state.selected = parsed.profiles.get(state.profile).occurrences.length ? 0 : null;
@@ -584,13 +632,10 @@
         state.expanded = new Set(); ui.search.value = ""; render();
         setStatus(`${file.name}: depx JSON version ${parsed.version}; ${parsed.profiles.size} profile${parsed.profiles.size === 1 ? "" : "s"}, ${parsed.dependencies.length} dependencies.`);
       } catch (error) {
-        state.document = null; state.profile = null; state.selected = null;
-        ui.search.disabled = true; ui.expand.disabled = true; ui.collapse.disabled = true; ui.profileControl.hidden = true;
-        ui.tree.replaceChildren(makeElement("div", "empty", error instanceof Error ? error.message : "Unable to read this trace."));
-        ui.details.replaceChildren(makeElement("p", "hint", "Correct the file or choose another depx trace to continue."));
-        updateSearchControls(); setStatus(error instanceof Error ? error.message : "Unable to read this trace.", true);
+        showLoadError(error instanceof Error ? error.message : "Unable to read this trace.");
       }
-    });
+    }
+    ui.input.addEventListener("change", async () => loadFile(ui.input.files && ui.input.files[0]));
     ui.profile.addEventListener("change", () => { state.profile = ui.profile.value; state.selected = currentProfile().occurrences.length ? 0 : null; state.expanded = new Set(); render(); setStatus(`Showing profile “${state.profile}”.`); });
     ui.search.addEventListener("input", () => { state.matchIndex = -1; render(); setStatus(state.matches.length ? `${state.matches.length} matching occurrence${state.matches.length === 1 ? "" : "s"}. Use Previous and Next to move through matches.` : "No matching occurrences."); });
     ui.search.addEventListener("keydown", (event) => { if (event.key === "Enter" && state.matches.length) { navigateMatch(event.shiftKey ? -1 : 1); event.preventDefault(); } });
@@ -601,7 +646,15 @@
        ui.collapse.addEventListener("click", () => { state.expanded.clear(); if (state.searchQuery) state.collapsedSearchBranches = new Set(currentProfile().occurrences.filter((item) => item.children.length).map((item) => item.index)); state.treePage = 0; render(); });
 
     // Export the parser for dependency-free node:test coverage in the offline test suite.
-       if (typeof globalThis !== "undefined") globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel };
+       if (typeof globalThis !== "undefined") globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, readResponseFile, loadAutomaticTrace, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel };
+       void loadAutomaticTrace({
+         protocol: window.location.protocol,
+         hash: window.location.hash,
+         fetchTrace: (relativePath) => fetch(relativePath),
+         FileConstructor: File,
+         loadFile,
+         reportError: showLoadError
+       });
   })();
   </script>
 </body>
