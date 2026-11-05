@@ -115,6 +115,9 @@ public class CompilerOptions {
 
     public final SourceRepository sourceRepository;
 
+    /** Shared ordered absolute include directories used by root-aware output. */
+    public final List<File> includeRoots;
+
     /**
      * Patterns that are matched against a template name to determine if debug()
      * calls are turned on or off. Template names matching one of the patterns
@@ -217,6 +220,11 @@ public class CompilerOptions {
         this.maxIteration = maxIteration;
         this.maxRecursion = maxRecursion;
         this.outputDirectory = outputDirectory;
+        List<File> roots = new LinkedList<File>();
+        for (File directory : includeDirectories) {
+            roots.add(directory.getAbsoluteFile().toPath().normalize().toFile());
+        }
+        this.includeRoots = Collections.unmodifiableList(roots);
 
         this.deprecationWarnings = deprecationWarnings;
 

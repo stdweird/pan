@@ -1,6 +1,11 @@
 package org.quattor.pan.output;
 
 import java.io.PrintWriter;
+import java.io.File;
+import java.util.List;
+import java.nio.file.Path;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Map;
 import java.util.TreeMap;
 import org.quattor.pan.repository.SourceFile;
@@ -8,7 +13,7 @@ import org.quattor.pan.tasks.FinalResult;
 import org.quattor.pan.ttemplate.IncludeTrace;
 import org.quattor.pan.ttemplate.Template;
 
-/** Version 1 runtime include trace with separate complete file dependencies. */
+/** Version 2 root-aware runtime include trace with complete file dependencies. */
 public class DepxFormatter extends AbstractFormatter {
     private static final DepxFormatter INSTANCE = new DepxFormatter();
 
@@ -32,15 +37,19 @@ public class DepxFormatter extends AbstractFormatter {
 
     @Override
     protected void write(FinalResult result, PrintWriter writer) {
-        writer.print("depx 1\n");
+        writer.print("depx 2\n");
+        List<File> roots = result.getIncludeRoots();
+        for (int i = 0; i < roots.size(); i++) {
+            writer.print("root " + i + " " + quote(roots.get(i).toString()) + "\n");
+        }
         for (Map.Entry<String, IncludeTrace> profile : new TreeMap<String, IncludeTrace>(
                 result.getIncludeTraces()).entrySet()) {
             writer.print("profile " + quote(profile.getKey()) + "\n");
             IncludeTrace trace = profile.getValue();
             for (int i = 0; i < trace.getMetadata().size(); i++) {
                 IncludeTrace.Metadata site = trace.getMetadata().get(i);
-                writer.print("  site " + i + names(site) + " caller-path=" + path(site.caller)
-                        + " target-path=" + path(site.target) + " location=" + location(site) + "\n");
+                writer.print("  site " + i + names(site) + " caller-path=" + path(site.caller, roots)
+                        + " target-path=" + path(site.target, roots) + " location=" + location(site) + "\n");
             }
             writer.print("  occurrences\n");
             int[] depths = new int[trace.size()];
@@ -59,7 +68,7 @@ public class DepxFormatter extends AbstractFormatter {
         }
         writer.print("dependencies\n");
         for (SourceFile source : result.getDependencies()) {
-            writer.print("  file " + quote(source.toString()) + "\n");
+            writer.print("  file " + quote(source(source, roots)) + "\n");
         }
     }
 
@@ -68,8 +77,34 @@ public class DepxFormatter extends AbstractFormatter {
                 + " target=" + quote(site.target == null ? null : site.target.name);
     }
 
-    private static String path(Template template) {
-        return quote(template == null || template.source == null ? null : template.source.toString());
+    private static String path(Template template, List<File> roots) {
+        return quote(template == null || template.source == null ? null : source(template.sourceFile, roots));
+    }
+
+    /** Compacts only the location URI, retaining source name, type and absence. */
+    static String source(SourceFile source, List<File> roots) {
+        if (source.getLocation() == null || roots.isEmpty()) {
+            return source.toString();
+        }
+        return source.getName() + " " + source.getType() + " " + compact(source.getLocation(), roots);
+    }
+
+    private static String compact(File file, List<File> roots) {
+        Path location = file.toPath().normalize();
+        for (int i = 0; i < roots.size(); i++) {
+            Path root = roots.get(i).toPath().normalize();
+            if (location.startsWith(root)) {
+                String relative = root.relativize(location).toString().replace(File.separatorChar, '/');
+                try {
+                    // URI escaping keeps relative Unicode and literal percent signs reversible.
+                    String suffix = new URI(null, null, "/" + relative, null).toASCIIString().substring(1);
+                    return "//" + (roots.size() == 1 ? "" : i + "//") + suffix;
+                } catch (URISyntaxException impossible) {
+                    throw new IllegalArgumentException("Cannot encode source location", impossible);
+                }
+            }
+        }
+        return file.toURI().toASCIIString();
     }
 
     private static String location(IncludeTrace.Metadata site) {

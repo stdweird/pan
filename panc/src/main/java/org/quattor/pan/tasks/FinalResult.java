@@ -51,6 +51,7 @@ public class FinalResult extends TaskResult {
 
 	Set<SourceFile> dependencies;
     private final Map<String, IncludeTrace> includeTraces;
+    private final List<java.io.File> includeRoots;
 
 	public FinalResult(Compiler compiler, Valid2Result result) {
 		super(ResultType.VALID2);
@@ -64,6 +65,7 @@ public class FinalResult extends TaskResult {
         }
 		this.dependencies = resolveAllDependencies(compiler, traces);
         this.includeTraces = Collections.unmodifiableMap(traces);
+        this.includeRoots = compiler == null ? Collections.<java.io.File>emptyList() : compiler.options.includeRoots;
 	}
 
 	public Element getRoot() {
@@ -77,6 +79,11 @@ public class FinalResult extends TaskResult {
     /** Returns immutable post-validation traces keyed by separate object profile name. */
     public Map<String, IncludeTrace> getIncludeTraces() {
         return includeTraces;
+    }
+
+    /** Returns the compiler's shared immutable include root table. */
+    public List<java.io.File> getIncludeRoots() {
+        return includeRoots;
     }
 
 	public Set<SourceFile> resolveAllDependencies(Compiler compiler) {

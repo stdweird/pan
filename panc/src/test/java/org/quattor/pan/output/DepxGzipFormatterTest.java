@@ -59,7 +59,7 @@ public class DepxGzipFormatterTest {
                 Collections.singletonList("trace_context"), Collections.<File>emptyList());
         assertTrue(compiled.getErrors().toString(), compiled.getErrors().isEmpty());
         String text = new String(decompress(new File(output, "trace_context.depx.gz")), StandardCharsets.UTF_8);
-        assertTrue(text.startsWith("depx 1\n"));
+        assertTrue(text.startsWith("depx 2\nroot 0 "));
         assertTrue(text.contains("    include "));
         assertTrue(text.contains("trace_payload.txt"));
         assertFalse(new File(output, "trace_context.depx").exists());

@@ -14,6 +14,26 @@ import static org.junit.Assert.*;
 
 public class DepxFormatterTest {
     @Test
+    public void compactsLocationUrisWithOrderedComponentRoots() throws Exception {
+        java.io.File base = new java.io.File("/tmp/é \"roots");
+        org.quattor.pan.repository.SourceFile source = new org.quattor.pan.repository.SourceFile(
+                "child", true, new java.io.File(base, "nested/child.pan"));
+        java.util.List<java.io.File> single = Collections.singletonList(base);
+        assertEquals("child PAN //nested", DepxFormatter.source(source, single));
+        assertEquals("child PAN //0//nested", DepxFormatter.source(source,
+                java.util.Arrays.asList(base, new java.io.File(base, "nested"))));
+        assertEquals("child PAN //0//", DepxFormatter.source(source,
+                java.util.Arrays.asList(new java.io.File(base, "nested"), base)));
+        assertEquals(source.toString(), DepxFormatter.source(source,
+                Collections.singletonList(new java.io.File("/tmp/é \"root"))));
+        assertEquals(source.toString(), DepxFormatter.source(source, Collections.<java.io.File>emptyList()));
+        org.quattor.pan.repository.SourceFile unicode = new org.quattor.pan.repository.SourceFile(
+                "child", true, new java.io.File(base, "é space%/child.pan"));
+        assertEquals("child PAN //%C3%A9%20space%25", DepxFormatter.source(unicode, single));
+        org.quattor.pan.repository.SourceFile absent = new org.quattor.pan.repository.SourceFile("child", true, null);
+        assertEquals(absent.toString(), DepxFormatter.source(absent, single));
+    }
+    @Test
     public void escapesControlsAndPreservesUnicodeAndUnknownMetadata() throws Exception {
         assertEquals("\"é\\r\\t\\u0000\\u007f\"", DepxFormatter.quote("é\r\t\u0000\u007f"));
         assertEquals("null", DepxFormatter.quote(null));
@@ -46,13 +66,36 @@ public class DepxFormatterTest {
         }
         assertNotNull(root);
         String text = render(root);
+        java.io.File configured = new java.io.File(System.getProperty("panc.testdir"), "depx").getAbsoluteFile();
+        assertTrue(text.startsWith("depx 2\nroot 0 " + DepxFormatter.quote(configured.toPath().normalize().toString()) + "\n"));
+        assertEquals(Collections.singletonList(configured.toPath().normalize().toFile()), root.getIncludeRoots());
+        assertTrue(text.contains("caller-path=\"trace_context PAN //\""));
+        for (IncludeTrace trace : root.getIncludeTraces().values()) {
+            for (IncludeTrace.Metadata site : trace.getMetadata()) {
+                for (Template template : new Template[] {site.caller, site.target}) {
+                    if (template != null && template.source != null) {
+                        String descriptor = DepxFormatter.source(template.sourceFile, root.getIncludeRoots());
+                        String field = template == site.caller ? "caller-path=" : "target-path=";
+                        assertTrue(text.contains(field + DepxFormatter.quote(descriptor)));
+                        String location = descriptor.substring((template.sourceFile.getName() + " "
+                                + template.sourceFile.getType() + " ").length());
+                        if (location.startsWith("//")) {
+                            String relative = java.net.URI.create("/" + location.substring(2)).getPath().substring(1);
+                            assertEquals(template.sourceFile.getLocation().toPath().normalize(),
+                                    configured.toPath().resolve(relative).normalize());
+                        }
+                    }
+                }
+            }
+        }
         assertTrue(text.contains("trace_payload.txt"));
         assertTrue(text.indexOf("profile \"trace_context\"") < text.indexOf("profile \"trace_external\""));
         StringWriter dep = new StringWriter();
         DepFormatter.getInstance().write(root, new PrintWriter(dep));
         StringBuilder expected = new StringBuilder("dependencies\n");
         for (String path : dep.toString().split("\\r?\\n")) {
-            expected.append("  file ").append(DepxFormatter.quote(path)).append('\n');
+            String location = configured.toURI().toASCIIString();
+            expected.append("  file ").append(DepxFormatter.quote(path.replace(location, "//"))).append('\n');
         }
         assertEquals(expected.toString(), text.substring(text.indexOf("dependencies\n")));
         for (String line : text.split("\n")) {
@@ -85,7 +128,7 @@ public class DepxFormatterTest {
         builder.enter(root, child, null, IncludeTrace.Status.CREATE);
         FinalResult result = new FinalResult(null, new Valid2Result("root\"\n\\\t", null,
                 Collections.<String>emptySet(), null, builder.snapshot()));
-        String expected = "depx 1\nprofile \"root\\\"\\n\\\\\\t\"\n"
+        String expected = "depx 2\nprofile \"root\\\"\\n\\\\\\t\"\n"
                 + "  site 0 caller=\"root\" target=\"child\" caller-path=null target-path=null location=2.3-2.9\n"
                 + "  site 1 caller=\"child\" target=\"child\" caller-path=null target-path=null location=null\n"
                 + "  site 2 caller=\"root\" target=\"child\" caller-path=null target-path=null location=null\n"
