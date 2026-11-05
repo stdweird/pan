@@ -173,24 +173,45 @@ external object profiles have separate sections, not fabricated include edges.
 The final dependency section preserves the same complete file set as ``dep``,
 including dependencies that are not represented by include occurrences.
 
-Version 1 text format
+Version 2 text format
 ---------------------
 
-Records use LF line endings. The first line is ``depx 1``. Profile sections
+Records use LF line endings. The first line is ``depx 2``. Profile sections
 are sorted by profile name; site indexes and occurrence indexes are local to
 each profile and assigned in encounter order. A schematic section is::
 
-    depx 1
+    depx 2
+    root 0 "/templates"
     profile "example"
-      site 0 caller="example" target="common" caller-path="/templates/example.pan" target-path="/templates/common.pan" location=2.1-2.17
+      site 0 caller="example" target="common" caller-path="example pan //" target-path="common pan //" location=2.1-2.17
       occurrences
         include 0 site=0 caller="example" target="common" location=2.1-2.17 status=executed
     dependencies
-      file "/templates/common.pan"
-      file "/templates/example.pan"
+      file "common pan //"
+      file "example pan //"
 
-Each ``site`` record contains the caller and target names, resolved source
-paths and statement location. Paths occur in site metadata rather than on
+The ordered ``root`` table records the absolute normalized include directories.
+With one directory, ``//`` denotes that root; with several, ``//0//``,
+``//1//`` and so on denote directories in configured include-search order.
+Locations beneath a root carry a relative suffix, for example
+``//site/configuration/`` or ``//1//site/configuration/``. The first matching
+root wins if directories overlap; matching uses directory boundaries.
+Locations outside every root remain absolute file URIs. With no configured
+roots, the table is empty and all locations remain unchanged. Template lookup
+behavior is unchanged, and no additional compiler option is required.
+
+Source values use the existing dependency descriptor ``NAME TYPE LOCATION``.
+The location is the template's load directory, not its full filename. Only that
+location is compacted; the source name and type remain intact, including absent
+sources with an empty location. Relative suffixes retain URI percent escaping:
+decode the suffix once and join it to the recorded root to resolve the directory.
+For example, ``common pan //`` identifies the Pan source named ``common`` in
+``/templates``. Version 1 had no root table: its site paths were absolute source
+filenames, while dependencies used descriptors with absolute location URIs.
+Consumers must check the version header.
+
+Each ``site`` record contains the caller and target names, source descriptors
+and statement location. Descriptors occur in site metadata rather than on
 every occurrence line. ``location`` uses
 ``beginLine.beginColumn-endLine.endColumn``. Missing metadata is the bare token
 ``null``.
@@ -209,6 +230,25 @@ carriage return and tab are escaped as ``\\\\``, ``\\\"``, ``\\n``, ``\\r`` and
 ``\\t`` respectively; other ISO control characters use lowercase four-digit
 ``\\uXXXX`` escapes. Other characters are preserved. A quoted ``"null"``
 is a string, distinct from missing metadata.
+
+Offline trace viewer
+--------------------
+
+Open ``panc/viewer/index.html`` from a checkout directly in a browser, then
+choose **Open depx file** and select a ``.depx`` or ``.depx.gz`` file. The
+standalone page needs no server, installation, or network connection and does
+not upload trace data. It reads both version 1 and version 2 files.
+
+Select a profile, expand occurrences, or search for a template, source location,
+or status to follow an inclusion chain. Repeated includes and skipped unique
+or declaration includes remain separate occurrences. Details show source
+descriptors with resolved load directories; the dependency inventory is separate
+from the occurrence tree. The trace describes evaluation, not timing.
+
+Gzip loading requires browser support for ``DecompressionStream``. If unavailable,
+decompress the file locally and open the resulting ``.depx`` file. The viewer
+limits input and decompressed content to 128 MiB; this is a safety limit, not a
+guarantee that very large traces will load quickly on every machine.
 
 
 panc-annotations
