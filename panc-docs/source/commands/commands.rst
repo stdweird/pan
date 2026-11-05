@@ -76,7 +76,8 @@ reorganized and simplified options, replaces the older ``panc`` command.
 ``--formats=``
     A comma separated list of desired output formats. Allowed values are
     "pan", "pan.gz", "xml", "xml.gz", "json", "json.gz", "txt", "dep", "dep.gz",
-    "depx", "depx.gz" and "dot". The default value is "pan,dep". See
+    "depx", "depx.gz", "depx.json", "depx.json.gz" and "dot".
+    The default value is "pan,dep". See
     :ref:`depx-output` for the extended dependency trace.
 
 ``--java-opts=``
@@ -231,13 +232,68 @@ carriage return and tab are escaped as ``\\\\``, ``\\\"``, ``\\n``, ``\\r`` and
 ``\\uXXXX`` escapes. Other characters are preserved. A quoted ``"null"``
 is a string, distinct from missing metadata.
 
+Version 1 JSON format
+----------------------
+
+Select ``depx.json`` or ``depx.json.gz`` for structured JSON traces::
+
+    panc --formats pan,depx.json.gz profiles/example.pan
+
+Both outputs contain identical UTF-8 JSON after decompression. JSON schema
+versioning is independent of the text format. The top-level object contains
+``format: "depx"``, ``version: 1``, an ordered ``roots`` array of absolute
+include directories, a ``profiles`` array sorted by name, and a separate
+``dependencies`` array. For example::
+
+    {
+      "format": "depx", "version": 1, "roots": ["/templates"],
+      "profiles": [{
+        "name": "example",
+        "sites": [{
+          "caller": {"name": "example", "source": {
+            "name": "example", "type": "PAN",
+            "location": {"root": 0, "path": ""}}},
+          "target": {"name": "common", "source": {
+            "name": "common", "type": "PAN",
+            "location": {"root": 0, "path": ""}}},
+          "location": {"begin_line": 2, "begin_column": 1,
+                       "end_line": 2, "end_column": 17}
+        }],
+        "occurrences": [{"site": 0, "parent": null, "status": "executed"}]
+      }],
+      "dependencies": [
+        {"name": "common", "type": "PAN", "location": {"root": 0, "path": ""}},
+        {"name": "example", "type": "PAN", "location": {"root": 0, "path": ""}}
+      ]
+    }
+
+Site and occurrence identifiers are their array indexes, local to each profile.
+Each occurrence references a shared ``site`` and has a ``parent`` that is either
+``null`` or an earlier occurrence index. The flat array preserves encounter
+order and nesting without deeply nested JSON. Status is ``executed``,
+``skipped_unique``, ``skipped_declaration``, or ``create``. Suppressed occurrences
+have no children. Caller, target, source, or statement location can be ``null``
+when the corresponding metadata is absent.
+
+A source has separate ``name``, ``type``, and ``location`` fields. The location
+is still a load directory, not an inferred source filename. In-root locations
+use ``{"root": INDEX, "path": RELATIVE}``, where ``RELATIVE`` is a literal
+slash-separated filesystem path; an empty path denotes the root itself. Unlike
+text depx suffixes, JSON relative paths are not URI-escaped. Percent signs,
+spaces and Unicode characters retain their literal meaning. The first matching
+include root wins, observing directory boundaries. Other locations use
+``{"uri": ABSOLUTE_FILE_URI}``; absent locations use ``null``. Dependencies
+include files that do not correspond to an include occurrence.
+
 Offline trace viewer
 --------------------
 
 Open ``panc/viewer/index.html`` from a checkout directly in a browser, then
-choose **Open depx file** and select a ``.depx`` or ``.depx.gz`` file. The
+select a ``.depx.json`` or ``.depx.json.gz`` file. The
 standalone page needs no server, installation, or network connection and does
-not upload trace data. It reads both version 1 and version 2 files.
+not upload trace data. It accepts JSON schema version 1 only; existing text
+``.depx`` and ``.depx.gz`` files remain compiler-supported but cannot be opened
+in this viewer. Regenerate those traces using a JSON output format.
 
 Select a profile, expand occurrences, or search for a template, source location,
 or status to follow an inclusion chain. Repeated includes and skipped unique
@@ -246,7 +302,7 @@ descriptors with resolved load directories; the dependency inventory is separate
 from the occurrence tree. The trace describes evaluation, not timing.
 
 Gzip loading requires browser support for ``DecompressionStream``. If unavailable,
-decompress the file locally and open the resulting ``.depx`` file. The viewer
+decompress the file locally and open the resulting ``.depx.json`` file. The viewer
 limits input and decompressed content to 128 MiB; this is a safety limit, not a
 guarantee that very large traces will load quickly on every machine.
 

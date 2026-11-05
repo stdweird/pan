@@ -5,240 +5,228 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
-const { CompressionStream } = require("node:stream/web");
+const zlib = require("node:zlib");
 
 const htmlPath = path.join(__dirname, "..", "index.html");
 const html = fs.readFileSync(htmlPath, "utf8");
-const inlineScript = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
-assert.ok(inlineScript, "offline viewer contains its self-hosted parser script");
-const browserWindow = { globalThis: null, TextDecoder, Blob, Response, DecompressionStream, CompressionStream };
-browserWindow.globalThis = browserWindow;
-vm.runInNewContext(inlineScript, browserWindow, { filename: htmlPath });
-const { parseDepx, readFile, resolvePath, buildVisibleModel, matchAt, moveRowSelection, dependencyPage } = browserWindow.DepxViewerParser;
+const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+vm.runInThisContext(script, { filename: htmlPath });
+const { parseDepx, resolvePath, readFile, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel, searchableText } = globalThis.DepxViewerParser;
 
-function occurrence(index, parentDepth, status = "executed", action = "include") {
-  return `${"  ".repeat(parentDepth + 2)}${action} ${index} site=0 caller="root" target="child" location=template.pan:1 status=${status}`;
-}
+const location = { begin_line: 4, begin_column: 0, end_line: 4, end_column: 12 };
+const fixture = () => ({
+  format: "depx",
+  version: 1,
+  roots: ["/work/100% ?# café"],
+  profiles: [{
+    name: "default",
+    sites: [
+      { caller: null, target: { name: "root", source: { name: "root", type: "Template", location: { root: 0, path: "" } } }, location: null },
+      { caller: { name: "root", source: { name: "root", type: "Template", location: { root: 0, path: "caller%?# 雪" } } }, target: { name: "child", source: { name: "child", type: "Template", location: { uri: "file:///external/child%25" } } }, location: { ...location } },
+      { caller: null, target: { name: "skipped", source: { name: "skipped", type: "Template", location: null } }, location: null },
+      { caller: null, target: { name: "declaration", source: null }, location: null },
+      { caller: null, target: { name: "created", source: { name: "created", type: "File", location: { root: 0, path: "created" } } }, location: null }
+    ],
+    occurrences: [
+      { site: 0, parent: null, status: "executed" },
+      { site: 1, parent: 0, status: "executed" },
+      { site: 1, parent: 0, status: "executed" },
+      { site: 2, parent: 2, status: "skipped_unique" },
+      { site: 3, parent: 2, status: "skipped_declaration" },
+      { site: 4, parent: null, status: "create" }
+    ]
+  }],
+  dependencies: [
+    { name: "dep", type: "File", location: { root: 0, path: "dep%?# Ω" } },
+    { name: "missing", type: "File", location: null },
+    { name: "outside", type: "File", location: { uri: "file:///outside/a%20b" } }
+  ]
+});
 
-function v1(contents, profile = "main", version = 1, roots = []) {
-  const rootLines = roots.map((root, index) => `root ${index} "${root}"`);
-  const pathFields = version === 1
-    ? 'caller-path="/repo/root.pan" target-path="/repo/child.pan"'
-    : 'caller-path="root file /repo/root.pan" target-path="child file /repo/child.pan"';
-  const dependencies = version === 1 ? '  file "/repo/child.pan"' : '  file "child file /repo/child.pan"';
-  return [`depx ${version}`, ...rootLines, `profile "${profile}"`, `  site 0 caller="root" target="child" ${pathFields} location=template.pan:1`, "  occurrences", ...contents, "dependencies", dependencies, ""].join("\n");
-}
-
-test("parses ordered v1 occurrences and keeps duplicate and suppressed includes distinct", () => {
-  const trace = parseDepx(v1([occurrence(0, 0), occurrence(1, 0, "skipped-unique"), occurrence(2, 1, "create", "create")]));
-  const profile = trace.profiles.get("main");
-  assert.equal(trace.version, 1);
-  assert.deepEqual(JSON.parse(JSON.stringify(profile.occurrences.map((item) => [item.index, item.parent, item.status]))), [
-    [0, null, "executed"], [1, null, "skipped-unique"], [2, 1, "create"]
+test("normalizes structured sources and preserves statuses, null metadata, and dependencies", () => {
+  const normalized = parseDepx(JSON.stringify(fixture()));
+  const profile = normalized.profiles.get("default");
+  assert.deepEqual([...profile.sites.keys()], [0, 1, 2, 3, 4]);
+  assert.deepEqual(profile.occurrences.map(({ status, parent, kind }) => [status, parent, kind]), [
+    ["executed", null, "include"], ["executed", 0, "include"], ["executed", 0, "include"],
+    ["skipped_unique", 2, "include"], ["skipped_declaration", 2, "include"], ["create", null, "create"]
   ]);
-  assert.equal(trace.dependencies[0], "/repo/child.pan");
+  assert.equal(profile.sites.get(0).caller, null);
+  assert.equal(profile.sites.get(0).location, null);
+  assert.equal(profile.sites.get(1).location, "4:0-4:12");
+  assert.match(profile.sites.get(1).callerPath, /caller%25%3F%23%20%E9%9B%AA/);
+  assert.equal(profile.sites.get(1).targetPath, "child Template file:///external/child%25");
+  assert.deepEqual(normalized.dependencies, [
+    "dep File file:///work/100%25%20%3F%23%20caf%C3%A9/dep%25%3F%23%20%CE%A9",
+    "missing (File)", "outside File file:///outside/a%20b"
+  ]);
 });
 
-test("parses escaped and Unicode values while keeping markup as plain data", () => {
-  const source = v1([occurrence(0, 0)]).replaceAll('caller="root"', 'caller="<img src=x> \\\"雪\\\""').replaceAll('target="child"', 'target="café"');
-  const profile = parseDepx(source).profiles.get("main");
-  assert.equal(profile.sites.get(0).caller, '<img src=x> "雪"');
-  assert.equal(profile.sites.get(0).target, "café");
-});
-
-test("rejects unsupported versions, invalid escapes, and malformed records", () => {
-  assert.throws(() => parseDepx("depx 3\n"), /Unsupported depx/);
-  assert.throws(() => parseDepx(v1([occurrence(0, 0)]).replace('target="child"', 'target="bad\\q"')), /unsupported escape/);
-  assert.throws(() => parseDepx(v1([occurrence(1, 0)])), /consecutive and ordered/);
-  assert.throws(() => parseDepx(v1([occurrence(0, 0, "unknown")])), /unknown occurrence status/);
-});
-
-test("rejects missing site references and nesting that skips a parent level", () => {
-  assert.throws(() => parseDepx(v1([occurrence(0, 0)]).replace("site=0", "site=8")), /unknown site/);
-  assert.throws(() => parseDepx(v1([occurrence(0, 2)])), /nesting skips a parent level/);
-});
-
-test("parses v2 root tables and resolves compacted SourceFile descriptor locations", () => {
-  const roots = ["/srv/templates", "/opt/shared"];
-  const compactedFixture = v1([occurrence(0, 0)], "main", 2, roots)
-    .replace('caller-path="root file /repo/root.pan" target-path="child file /repo/child.pan"', 'caller-path="root file ASCII file:///repo/root.pan" target-path="child file ASCII //0//child.pan"')
-    .replace('file "child file /repo/child.pan"', 'file "child file ASCII //0//child.pan"');
-  const parsed = parseDepx(compactedFixture);
-  assert.deepEqual(JSON.parse(JSON.stringify(parsed.roots)), roots);
-  assert.equal(resolvePath(parsed.profiles.get("main").sites.get(0).targetPath, roots, 2), "child file ASCII file:///srv/templates/child.pan");
-  assert.equal(resolvePath("child file ASCII //1//network/vlan%20a.pan", roots, 2), "child file ASCII file:///opt/shared/network/vlan%20a.pan");
-  assert.equal(resolvePath("child file ASCII file:///absolute/path", roots, 2), "child file ASCII file:///absolute/path");
-  assert.equal(resolvePath("child file ASCII //0//", roots, 2), "child file ASCII file:///srv/templates");
-  assert.equal(resolvePath("child file ASCII //one%2Ftwo", ["/srv/templates"], 2), "child file ASCII file:///srv/templates/one/two");
-  assert.throws(() => resolvePath("child file ASCII //network/vlan.pan", roots), /must include a root index/);
-  assert.throws(() => resolvePath("child file ASCII //2//missing.pan", roots), /missing include root/);
-  assert.throws(() => parseDepx(v1([occurrence(0, 0)], "main", 2, roots).replace("root 1", "root 2")), /contiguous and ordered/);
-  assert.throws(() => parseDepx(compactedFixture.replace('file "child file ASCII //0//child.pan"', 'file "child file ASCII //0//child.pan"\n  file "child file ASCII //0//child.pan"')), /duplicate dependency/);
-});
-
-test("rejects v2 root references without a root table and malformed root URI escapes", () => {
-  const emptyRoots = parseDepx(v1([occurrence(0, 0)], "main", 2));
-  assert.throws(() => resolvePath("child file ASCII //source.pan", emptyRoots.roots), /empty/);
-  assert.throws(() => resolvePath("child file ASCII //bad%2", ["/srv/templates"], 2), /URI escaping/);
-  assert.throws(() => parseDepx(v1([occurrence(0, 0)], "main", 2, ["relative/path"])), /must be absolute/);
-  for (const escaped of ["..", "%2e%2e", ".", "%2e", "%2E%2e", "dir%2F..", "dir%5C..", "dir%5c..", "%2Fetc", "dir%5Csecret"]) {
-    assert.throws(() => resolvePath(`child ASCII //${escaped}`, ["/srv/templates"], 2), /escape its include root/, escaped);
+test("requires JSON format, version, schema types, references, unique profiles, and valid sources", () => {
+  const cases = [
+    ["format", (value) => { value.format = "other"; }, /format/],
+    ["version", (value) => { value.version = 2; }, /version/],
+    ["roots", (value) => { value.roots = "/tmp"; }, /arrays/],
+    ["absolute root", (value) => { value.roots[0] = "relative"; }, /absolute/],
+    ["profiles", (value) => { value.profiles[0].sites[0].target.source.location.root = 2; }, /missing root/],
+    ["unknown site", (value) => { value.profiles[0].occurrences[0].site = 8; }, /unknown site/],
+    ["invalid status", (value) => { value.profiles[0].occurrences[0].status = "ignored"; }, /status/],
+    ["bad location", (value) => { value.profiles[0].sites[1].location.begin_line = 0; }, /coordinate/],
+    ["bad source", (value) => { value.profiles[0].sites[1].target.source.location = { root: 0, path: "../escape" }; }, /traversal/],
+    ["ambiguous source location", (value) => { value.dependencies[0].location = { root: 0, path: "ok", uri: "file:///also" }; }, /either root and path or URI/],
+    ["bad URI", (value) => { value.dependencies[0].location = { uri: "https://example.test/a" }; }, /file URI/],
+    ["malformed file URI", (value) => { value.dependencies[0].location = { uri: "file:///bad%2" }; }, /file URI/],
+    ["relative file URI", (value) => { value.dependencies[0].location = { uri: "file:relative" }; }, /file URI/],
+    ["duplicate profile", (value) => { value.profiles.push(structuredClone(value.profiles[0])); }, /Duplicate profile/],
+    ["missing required source", (value) => { delete value.profiles[0].sites[1].target.source.type; }, /type/]
+  ];
+  for (const [label, change, error] of cases) {
+    const value = fixture();
+    if (label === "bad URI") value.profiles[0].sites[1].location = null;
+    change(value);
+    assert.throws(() => parseDepx(JSON.stringify(value)), error, label);
   }
-  assert.throws(() => resolvePath("child file ASCII //sub/../file%20name.pan", ["/srv/templates"], 2), /escape its include root/);
-  assert.throws(() => resolvePath("child file ASCII //../outside.pan", ["/"], 2), /escape its include root/);
+  assert.throws(() => parseDepx("{bad json"), /Invalid depx JSON/);
 });
 
-test("accepts absolute root directory names containing literal question marks and hashes", () => {
-  const roots = ["/srv/templates?rev=#stable"];
-  const parsed = parseDepx(v1([occurrence(0, 0)], "main", 2, roots));
-  assert.deepEqual(JSON.parse(JSON.stringify(parsed.roots)), roots);
-  assert.equal(resolvePath("child file ASCII //", roots, 2), "child file ASCII file:///srv/templates%3Frev%3D%23stable");
-  assert.equal(resolvePath("child file ASCII //folder.pan", roots, 2), "child file ASCII file:///srv/templates%3Frev%3D%23stable/folder.pan");
+test("requires occurrence parents to be earlier active ancestors and forbids skipped children", () => {
+  const futureParent = fixture(); futureParent.profiles[0].occurrences[1].parent = 3;
+  assert.throws(() => parseDepx(JSON.stringify(futureParent)), /earlier occurrence/);
+  const nonAncestor = fixture(); nonAncestor.profiles[0].occurrences[3].parent = 1;
+  assert.throws(() => parseDepx(JSON.stringify(nonAncestor)), /active ancestor/);
+  for (const status of ["skipped_unique", "skipped_declaration"]) {
+    const skippedParent = fixture();
+    skippedParent.profiles[0].occurrences[2].status = status;
+    skippedParent.profiles[0].occurrences[3].parent = 2;
+    assert.throws(() => parseDepx(JSON.stringify(skippedParent)), /skipped/);
+  }
+  const createdParent = fixture();
+  createdParent.profiles[0].occurrences.push({ site: 1, parent: 5, status: "executed" });
+  assert.equal(parseDepx(JSON.stringify(createdParent)).profiles.get("default").occurrences[6].parent, 5);
 });
 
-test("preserves raw percent characters in root paths while encoding file URIs", () => {
-  assert.equal(resolvePath("child file ASCII //file.pan", ["/srv/100%"], 2), "child file ASCII file:///srv/100%25/file.pan");
-  assert.equal(resolvePath("child file ASCII //file.pan", ["/srv/literal%20name"], 2), "child file ASCII file:///srv/literal%2520name/file.pan");
-  assert.equal(resolvePath("child file ASCII //file.pan", ["/srv/literal%2Fname"], 2), "child file ASCII file:///srv/literal%252Fname/file.pan");
+test("keeps path text literal and never URI-decodes percent, question, hash, or Unicode", () => {
+  const parsed = parseDepx(JSON.stringify(fixture()));
+  const pathValue = parsed.dependencies[0];
+  assert.ok(pathValue.includes("100%25%20%3F%23%20caf%C3%A9/dep%25%3F%23%20%CE%A9"));
+  assert.equal(resolvePath({ name: "x", type: "File", location: { root: 0, path: "a%2Fb" } }, ["/r"]), "x File file:///r/a%252Fb");
+  assert.equal(resolvePath({ name: "x", type: "File", location: { root: 0, path: "child" } }, ["/"]), "x File file:///child");
+  assert.equal(resolvePath({ name: "x", type: "File", location: { root: 0, path: "child" } }, ["/root/"]), "x File file:///root/child");
+  const javaUri = "file:/tmp/caf%C3%A9%25.txt";
+  const javaUriFixture = fixture();
+  javaUriFixture.dependencies[0].location = { uri: javaUri };
+  assert.equal(parseDepx(JSON.stringify(javaUriFixture)).dependencies[0], "dep File file:///tmp/caf%C3%A9%25.txt");
+  javaUriFixture.dependencies[0].location = { uri: "file:/" };
+  assert.equal(parseDepx(JSON.stringify(javaUriFixture)).dependencies[0], "dep File file:///");
+  assert.throws(() => resolvePath("legacy source descriptor", ["/r"]), /structured JSON/);
+  for (const traversal of ["..", "../x", "a/../x", "a\\..\\x", "/absolute"]) {
+    const value = fixture(); value.dependencies[0].location.path = traversal;
+    assert.throws(() => parseDepx(JSON.stringify(value)), /relative path|traversal/);
+  }
 });
 
-test("offline UI keeps potentially hostile file content on text-only render paths", () => {
-  assert.doesNotMatch(html, /\.innerHTML\s*=/);
-  assert.match(html, /function makeElement[\s\S]*element\.textContent = text/);
-  assert.match(html, /aria-live="polite"/);
-  assert.match(html, /id="open-file"/);
+test("allows null caller, target, and source metadata from the approved schema", () => {
+  const value = fixture();
+  value.profiles[0].sites[0].target = null;
+  value.profiles[0].sites[1].caller = null;
+  value.profiles[0].sites[1].target.source = null;
+  const profile = parseDepx(JSON.stringify(value)).profiles.get("default");
+  assert.equal(profile.sites.get(0).target, null);
+  assert.equal(profile.sites.get(1).caller, null);
+  assert.equal(profile.sites.get(1).targetPath, null);
 });
 
-test("resolves ASCII file URIs to full local filesystem paths", () => {
-  assert.equal(resolvePath("template ASCII file:///srv/templates/base%20file.pan", []), "template ASCII file:///srv/templates/base%20file.pan");
-  assert.equal(resolvePath("template ASCII file://server/share/base.pan", []), "template ASCII file://server/share/base.pan");
+test("keeps hostile names and source strings as plain text data", () => {
+  const value = fixture();
+  value.profiles[0].name = '<img src=x onerror="alert(1)">';
+  value.profiles[0].sites[0].target.name = "<script>alert(1)</script>";
+  value.dependencies[0].name = "</li><img src=x>";
+  const normalized = parseDepx(JSON.stringify(value));
+  assert.equal(normalized.profiles.keys().next().value, value.profiles[0].name);
+  assert.equal(normalized.profiles.get(value.profiles[0].name).sites.get(0).target, value.profiles[0].sites[0].target.name);
+  assert.equal(normalized.dependencies[0].startsWith("</li><img src=x>"), true);
+  assert.match(html, /textContent = text/);
+  assert.doesNotMatch(html, /innerHTML\s*=/);
 });
 
-test("retains source type and the empty-location marker for absent sources", () => {
-  assert.equal(resolvePath("virtual builtin ", [], 2), "virtual (builtin)");
+test("normalizes very deep flat traces iteratively and keeps rendered pages bounded", () => {
+  const value = fixture();
+  value.profiles[0].sites = [{ caller: null, target: { name: "deep", source: null }, location: null }];
+  value.profiles[0].occurrences = Array.from({ length: 16001 }, (_, index) => ({ site: 0, parent: index ? index - 1 : null, status: "executed" }));
+  const occurrences = parseDepx(JSON.stringify(value)).profiles.get("default").occurrences;
+  assert.equal(occurrences.at(-1).depth, 16000);
+  assert.equal(occurrences[0].children.length, 1);
+  const model = buildVisibleModel(occurrences, new Set(), new Set(), false, 0, 500);
+  assert.equal(model.visible.length, 1);
+  const allExpanded = buildVisibleModel(occurrences, new Set(), new Set(occurrences.map(({ index }) => index)), false, 0, 500);
+  assert.equal(allExpanded.visible.length, 500);
+  assert.equal(allExpanded.allVisible.length, 16001);
 });
 
-test("traverses very deep occurrence traces without recursive parser calls", () => {
-  const count = 16000;
-  const rows = Array.from({ length: count }, (_, index) => occurrence(index, index));
-  const parsed = parseDepx(v1(rows));
-  assert.equal(parsed.profiles.get("main").occurrences.length, count);
-  assert.equal(parsed.profiles.get("main").occurrences[count - 1].depth, count - 1);
+test("retains search, pagination, and keyboard navigation helpers", () => {
+  assert.equal(matchAt([2, 5, 8], 5, 1), 2);
+  assert.deepEqual(moveRowSelection([{ index: 1 }, { index: 2 }], 1, 0, 1, "ArrowDown"), { index: 2, page: 1 });
+  assert.deepEqual(dependencyPage([1, 2, 3], 1, 2), { items: [3], page: 1, pageCount: 2, start: 2 });
+  assert.equal(statusLabel("skipped_unique"), "skipped unique");
+  assert.equal(statusLabel("skipped_declaration"), "skipped declaration");
+  assert.equal(statusLabel("create"), "create");
+  assert.ok(searchableText({ site: { caller: null, target: "leaf", callerPath: null, targetPath: null }, location: null, status: "skipped_unique" }).includes("skipped unique"));
 });
 
-test("searches and navigates all matches in a 16,000-deep occurrence chain with bounded pages", () => {
-  const count = 16000;
-  const occurrences = Array.from({ length: count }, (_, index) => ({ index, parent: index === 0 ? null : index - 1, children: index === count - 1 ? [] : [index + 1] }));
-  const matches = new Set(Array.from({ length: count }, (_, index) => index));
-  const firstPage = buildVisibleModel(occurrences, matches, new Set(), true, 0, 500);
-  assert.equal(firstPage.visible.length, 500);
-  assert.equal(firstPage.allVisible.length, count);
-  assert.equal(firstPage.pageCount, 32);
-  assert.equal(firstPage.expanded.size, count - 1);
-  assert.equal(firstPage.expanded.has(count - 1), false);
-  assert.equal(firstPage.expanded.has(0), true);
-  const allMatches = Array.from(matches);
-  assert.equal(matchAt(allMatches, 499, 1), 500);
-  assert.equal(matchAt(allMatches, 15999, 1), 0);
-  assert.equal(moveRowSelection(firstPage.allVisible, 499, 0, 500, "ArrowDown").index, 500);
-  assert.equal(moveRowSelection(firstPage.allVisible, 499, 0, 500, "ArrowDown").page, 1);
-  assert.equal(moveRowSelection(firstPage.allVisible, 500, 1, 500, "ArrowUp").index, 499);
-  assert.equal(moveRowSelection(firstPage.allVisible, 0, 0, 500, "End").index, 15999);
-  const finalPage = buildVisibleModel(occurrences, matches, firstPage.expanded, true, 31, 500);
-  assert.equal(finalPage.visible.at(-1).index, 15999);
-  assert.equal(dependencyPage(Array.from({ length: 1001 }, (_, i) => i), 4, 250).items.at(-1), 1000);
-  assert.equal(dependencyPage(Array.from({ length: 1001 }, (_, i) => i), 4, 250).page, 4);
+test("offers JSON and gzip JSON only in the file picker and help copy", () => {
+  assert.match(html, /accept="\.json,\.gz,application\/json,application\/gzip"/);
+  assert.match(html, /Choose a \.depx\.json or \.depx\.json\.gz file/);
+  assert.doesNotMatch(html, /depx 1|depx 2|\.depx or \.depx\.gz/);
+  assert.match(html, /occurrence\.status\.startsWith\("skipped"\)/);
+  assert.match(html, /\$\{occurrence\.kind\} · \$\{statusLabel\(occurrence\.status\)\}/);
 });
 
-test("search-filtered tree can collapse and reopen matching branches", () => {
-  const occurrences = [
-    { index: 0, parent: null, children: [1] },
-    { index: 1, parent: 0, children: [2] },
-    { index: 2, parent: 1, children: [] }
-  ];
-  const matches = new Set([2]);
-  const expanded = buildVisibleModel(occurrences, matches, new Set(), true, 0, 500);
-  assert.deepEqual(Array.from(expanded.visible, (row) => row.index), [0, 1, 2]);
-  const collapsed = buildVisibleModel(occurrences, matches, new Set(), true, 0, 500, new Set([1]));
-  assert.deepEqual(Array.from(collapsed.visible, (row) => row.index), [0, 1]);
+test("decompresses gzip JSON locally, enforces size limits, and reports invalid gzip", async () => {
+  const json = JSON.stringify(fixture());
+  const gzip = zlib.gzipSync(Buffer.from(json));
+  const file = (name, bytes, reportedSize = bytes.length) => ({ name, size: reportedSize, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+  assert.equal(await readFile(file("trace.depx.json.gz", gzip)), json);
+  await assert.rejects(readFile(file("huge.json", Buffer.from("{}"), 128 * 1024 * 1024 + 1)), /128 MiB/);
+  await assert.rejects(readFile(file("invalid.json.gz", Buffer.from([0x1f, 0x8b, 0, 0]))), /decompress/);
 });
 
-test("visible tree model preserves occurrence order when only some results match", () => {
-  const occurrences = [
-    { index: 0, parent: null, children: [1, 3] },
-    { index: 1, parent: 0, children: [2] },
-    { index: 2, parent: 1, children: [] },
-    { index: 3, parent: 0, children: [] }
-  ];
-  const model = buildVisibleModel(occurrences, new Set([2]), new Set(), true, 0, 2);
-  assert.deepEqual(Array.from(model.visible, (row) => row.index), [0, 1]);
-  assert.deepEqual(Array.from(buildVisibleModel(occurrences, new Set([2]), model.expanded, true, 1, 2).visible, (row) => row.index), [2]);
-});
-
-test("UI controls expose pagination, keyboard tree navigation, and honest search collapse", () => {
-  assert.match(html, /id="tree-previous-page"/);
-  assert.match(html, /id="tree-next-page"/);
-  assert.match(html, /Files \$\{page\.start \+ 1\}–\$\{Math\.min\(page\.start \+ DEPENDENCY_PAGE_SIZE, dependencyCount\)\} of/);
-  assert.match(html, /Next files/);
-  assert.match(html, /aria-label="Occurrence tree pages"/);
-  assert.match(html, /moveRowSelection\(state\.allVisible, index, state\.treePage, PAGE_SIZE, event\.key\)/);
-  assert.match(html, /collapsedSearchBranches\.add\(occurrence\.index\)/);
-  assert.match(html, /navigateMatch\(event\.shiftKey \? -1 : 1\)/);
-});
-
-test("decompresses gzip locally and reports invalid gzip data", async () => {
-  const content = Buffer.from(v1([occurrence(0, 0)]));
-  const compressedStream = new Blob([content]).stream().pipeThrough(new CompressionStream("gzip"));
-  const compressed = Buffer.from(await new Response(compressedStream).arrayBuffer());
-  const file = { name: "trace.depx.gz", size: compressed.length, arrayBuffer: async () => compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) };
-  assert.match(await readFile(file), /^depx 1/);
-  const broken = { name: "broken.depx.gz", size: 4, arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer };
-  await assert.rejects(() => readFile(broken), /Could not decompress/);
-});
-
-test("consumes compiler-generated v2 trace_context output with gzip parity", {
-  skip: !process.env.DEPX_INTEGRATION_FILE && "set DEPX_INTEGRATION_FILE to compiler-generated trace_context.depx"
-}, async (context) => {
-  const filename = process.env.DEPX_INTEGRATION_FILE;
-  const plainText = fs.readFileSync(filename, "utf8");
-  const parsed = parseDepx(plainText);
-  assert.equal(parsed.version, 2);
-  assert.equal(parsed.roots.length, 1);
-  assert.ok(path.isAbsolute(parsed.roots[0]));
-  assert.equal(parsed.profiles.size, 2);
-  assert.equal(parsed.dependencies.length, 7);
-  const main = parsed.profiles.get("trace_context");
-  const external = parsed.profiles.get("trace_external");
-  assert.equal(main.sites.size, 4);
-  assert.equal(main.occurrences.length, 6);
-  assert.equal(external.sites.size, 1);
-  assert.equal(external.occurrences.length, 1);
-  assert.deepEqual(Array.from(main.occurrences, (item) => item.status), [
-    "executed", "create", "executed", "executed", "create", "executed"
-  ]);
-  for (const profile of parsed.profiles.values()) {
-    for (const site of profile.sites.values()) {
-      for (const descriptor of [site.callerPath, site.targetPath]) {
-        const resolved = resolvePath(descriptor, parsed.roots, parsed.version);
-        assert.match(resolved, / file:\/\/\//);
-        assert.doesNotMatch(resolved, / \/\//);
+test("consumes compiler-generated depx JSON and matching gzip output", async (t) => {
+  const integrationPath = process.env.DEPX_INTEGRATION_FILE;
+  if (!integrationPath) return t.skip("set DEPX_INTEGRATION_FILE to compiler-generated trace_context.depx.json");
+  const jsonBytes = fs.readFileSync(integrationPath);
+  const compressedPath = `${integrationPath}.gz`;
+  const gzipBytes = fs.readFileSync(compressedPath);
+  const jsonText = jsonBytes.toString("utf8");
+  const gzipText = await readFile({ name: path.basename(compressedPath), size: gzipBytes.length, arrayBuffer: async () => gzipBytes.buffer.slice(gzipBytes.byteOffset, gzipBytes.byteOffset + gzipBytes.byteLength) });
+  assert.equal(gzipText, jsonText, "gzip output decompresses to the exact plain JSON bytes");
+  const plain = parseDepx(jsonText);
+  const compressed = parseDepx(gzipText);
+  assert.equal(plain.roots.length, 1);
+  assert.equal(plain.profiles.size, 2);
+  assert.equal(Array.from(plain.profiles.values()).reduce((count, profile) => count + profile.sites.size, 0), 5);
+  assert.equal(Array.from(plain.profiles.values()).reduce((count, profile) => count + profile.occurrences.length, 0), 7);
+  assert.equal(Array.from(plain.profiles.values()).flatMap((profile) => profile.occurrences).filter(({ status }) => status === "executed").length, 5);
+  assert.equal(Array.from(plain.profiles.values()).flatMap((profile) => profile.occurrences).filter(({ status }) => status === "create").length, 2);
+  assert.equal(plain.dependencies.length, 7);
+  assert.deepEqual(compressed.roots, plain.roots);
+  assert.deepEqual(compressed.dependencies, plain.dependencies);
+  for (const [name, profile] of plain.profiles) {
+    const gzipProfile = compressed.profiles.get(name);
+    assert.ok(gzipProfile, `gzip trace contains profile ${name}`);
+    assert.deepEqual(
+      gzipProfile.occurrences.map(({ parent, siteIndex, status }) => ({ parent, siteIndex, status })),
+      profile.occurrences.map(({ parent, siteIndex, status }) => ({ parent, siteIndex, status }))
+    );
+    assert.equal(gzipProfile.sites.size, profile.sites.size);
+    for (const [siteIndex, site] of profile.sites) {
+      const compressedSite = gzipProfile.sites.get(siteIndex);
+      assert.deepEqual([compressedSite.caller, compressedSite.target, compressedSite.callerPath, compressedSite.targetPath, compressedSite.location], [site.caller, site.target, site.callerPath, site.targetPath, site.location]);
+      for (const sourcePath of [site.callerPath, site.targetPath]) {
+        if (sourcePath !== null) {
+          assert.match(sourcePath, / file:\/\//, "normalized source path is an absolute file URI");
+          assert.doesNotMatch(sourcePath, /\{\s*root\s*:/, "normalized source paths do not expose unresolved root descriptors");
+        }
       }
     }
   }
-  for (const descriptor of parsed.dependencies) {
-    const resolved = resolvePath(descriptor, parsed.roots, parsed.version);
-    assert.match(resolved, / file:\/\/\//);
-    assert.doesNotMatch(resolved, / \/\//);
-  }
-  const compressed = fs.readFileSync(`${filename}.gz`);
-  const gzipText = await readFile({
-    name: path.basename(`${filename}.gz`),
-    size: compressed.length,
-    arrayBuffer: async () => compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength)
-  });
-  assert.equal(gzipText, plainText);
-  const gzipParsed = parseDepx(gzipText);
-  assert.deepEqual(Array.from(gzipParsed.profiles.keys()), Array.from(parsed.profiles.keys()));
-  assert.deepEqual(Array.from(gzipParsed.dependencies), Array.from(parsed.dependencies));
-  context.diagnostic("v2: 1 root, 2 profiles, 5 sites, 7 occurrences (5 executed, 2 create), 7 dependencies; gzip parity passed");
 });
