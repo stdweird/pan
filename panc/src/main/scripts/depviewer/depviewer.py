@@ -1,6 +1,8 @@
 """Open a dependency trace in the adjacent viewer over protected loopback HTTP."""
 
 import argparse
+import io
+import json
 import logging
 import os
 import secrets
@@ -8,14 +10,83 @@ import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import BinaryIO, cast
-from urllib.parse import quote
 
 LOGGER = logging.getLogger("depviewer")
 CHUNK_SIZE = 64 * 1024
+TRACE_SUFFIXES = (".depx.json", ".depx.json.gz")
 
 
-def make_handler(page: Path, trace: Path, token: str) -> type[BaseHTTPRequestHandler]:
-    """Build a handler exposing exactly two files under a secret route prefix."""
+def build_inventory(inputs: list[Path]) -> tuple[list[Path], list[dict[str, str]]]:
+    """Snapshot readable trace paths without following discovered directory links."""
+    paths: set[Path] = set()
+    LOGGER.info("Trace discovery started with %s inputs", len(inputs))
+
+    def add_trace(path: Path, explicit: bool) -> None:
+        """Validate readability without reading or parsing trace contents."""
+        try:
+            if not path.name.endswith(TRACE_SUFFIXES):
+                raise ValueError("trace must end in .depx.json or .depx.json.gz")
+            resolved = path.resolve(strict=True)
+            if not resolved.is_file():
+                raise ValueError("trace is not a regular file")
+            with resolved.open("rb"):
+                pass
+            paths.add(resolved)
+        except (OSError, RuntimeError, ValueError) as error:
+            if explicit:
+                raise ValueError(
+                    "explicit input trace is invalid or not readable; expected .depx.json or .depx.json.gz"
+                ) from error
+            LOGGER.warning("Discovered trace omitted (%s)", type(error).__name__)
+
+    def walk_error(error: OSError) -> None:
+        """Report inaccessible discovered directories without leaking path names."""
+        LOGGER.warning("Discovered directory omitted (%s)", type(error).__name__)
+
+    for path in inputs:
+        try:
+            if path.is_dir():
+                if path.is_symlink():
+                    raise ValueError(
+                        "explicit input directory symlinks are not followed"
+                    )
+                with os.scandir(path):
+                    pass
+                for root, directories, filenames in os.walk(
+                    path, onerror=walk_error, followlinks=False
+                ):
+                    directories[:] = sorted(
+                        name
+                        for name in directories
+                        if not (Path(root) / name).is_symlink()
+                    )
+                    for name in sorted(filenames):
+                        if name.endswith(TRACE_SUFFIXES):
+                            add_trace(Path(root) / name, explicit=False)
+            else:
+                add_trace(path, explicit=True)
+        except OSError as error:
+            raise ValueError("explicit input directory is not readable") from error
+    traces = sorted(paths)
+    if not traces:
+        raise ValueError("no readable dependency traces found in inputs")
+    base = Path(os.path.commonpath([str(path.parent) for path in traces]))
+    catalog = [
+        {"id": str(index), "name": path.relative_to(base).as_posix()}
+        for index, path in enumerate(traces)
+    ]
+    LOGGER.info("Trace discovery completed: %s unique traces", len(traces))
+    return traces, catalog
+
+
+def make_handler(
+    page: Path, traces: list[Path], catalog: list[dict[str, str]], token: str
+) -> type[BaseHTTPRequestHandler]:
+    """Build a handler exposing only inventory IDs under a secret route prefix."""
+    trace_routes = {
+        f"/{token}/trace/{index}": path for index, path in enumerate(traces)
+    }
+    catalog_bytes = json.dumps({"traces": catalog}).encode("utf-8")
 
     class ViewerHandler(BaseHTTPRequestHandler):
         """Serve allowlisted assets while enforcing the loopback origin boundary."""
@@ -37,28 +108,43 @@ def make_handler(page: Path, trace: Path, token: str) -> type[BaseHTTPRequestHan
                 return
             if self.path == f"/{token}/depviewer.html":
                 asset, content_type = page, "text/html; charset=utf-8"
-            elif self.path == f"/{token}/trace":
-                asset, content_type = trace, "application/octet-stream"
+            elif self.path == f"/{token}/catalog":
+                try:
+                    self.send_response(200)
+                    self.asset_headers(
+                        "application/json; charset=utf-8", len(catalog_bytes)
+                    )
+                    self.stream(io.BytesIO(catalog_bytes))
+                except (BrokenPipeError, ConnectionResetError):
+                    LOGGER.debug("Viewer client disconnected during catalog transfer")
+                return
+            elif self.path in trace_routes:
+                asset, content_type = (
+                    trace_routes[self.path],
+                    "application/octet-stream",
+                )
             else:
                 self.send_error(404)
                 return
             try:
                 with asset.open("rb") as source:
                     self.send_response(200)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header(
-                        "Content-Length", str(os.fstat(source.fileno()).st_size)
-                    )
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("Referrer-Policy", "no-referrer")
-                    self.send_header("X-Content-Type-Options", "nosniff")
-                    self.end_headers()
+                    self.asset_headers(content_type, os.fstat(source.fileno()).st_size)
                     self.stream(source)
             except (BrokenPipeError, ConnectionResetError):
                 LOGGER.debug("Viewer client disconnected during asset transfer")
             except OSError as error:
                 LOGGER.error("Viewer asset transfer failed (%s)", type(error).__name__)
                 self.close_connection = True
+
+        def asset_headers(self, content_type: str, size: int) -> None:
+            """Apply shared no-store and browser safety headers."""
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
 
         def stream(self, source: BinaryIO) -> None:
             """Copy an asset in bounded chunks without decoding gzip input."""
@@ -84,14 +170,18 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="depviewer: %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "trace", type=Path, help="trace.depx.json or trace.depx.json.gz"
+        "paths",
+        type=Path,
+        nargs="+",
+        help="trace.depx.json, trace.depx.json.gz, or recursive directory",
     )
     args = parser.parse_args()
-    trace: Path = args.trace
-    if not trace.name.endswith((".depx.json", ".depx.json.gz")):
-        parser.error("trace must end in .depx.json or .depx.json.gz")
+    try:
+        traces, catalog = build_inventory(args.paths)
+    except ValueError as error:
+        parser.error(str(error))
     page = Path(__file__).resolve().with_name("depviewer.html")
-    for asset, label in ((trace, "trace"), (page, "viewer page")):
+    for asset, label in ((page, "viewer page"),):
         try:
             if not asset.is_file():
                 parser.error(f"{label} is missing or is not a regular file")
@@ -102,13 +192,10 @@ def main() -> int:
     token = secrets.token_urlsafe(32)
     try:
         with ThreadingHTTPServer(
-            ("127.0.0.1", 0), make_handler(page, trace, token)
+            ("127.0.0.1", 0), make_handler(page, traces, catalog, token)
         ) as server:
             LOGGER.info("Viewer server started on loopback port %s", server.server_port)
-            url = (
-                f"http://127.0.0.1:{server.server_port}/{token}/depviewer.html"
-                f"#filename={quote(trace.name, safe='')}"
-            )
+            url = f"http://127.0.0.1:{server.server_port}/{token}/depviewer.html"
             try:
                 subprocess.run(
                     ["xdg-open", url],

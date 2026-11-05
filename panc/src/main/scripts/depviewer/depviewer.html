@@ -36,6 +36,13 @@
     .controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 18px 0; }
     .control { display: grid; gap: 5px; min-width: 155px; }
     .control.search { flex: 1 1 290px; }
+    .trace-picker { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.3fr) auto; align-items: end; gap: 10px; border: 1px solid var(--line); border-radius: 6px; background: white; padding: 12px; }
+    .trace-picker[hidden] { display: none; }
+    .trace-picker .control { min-width: 0; }
+    .trace-filter-actions { display: flex; gap: 7px; }
+    .trace-summary { grid-column: 1 / -1; min-height: 1.3em; }
+    .trace-pager { display: flex; align-items: center; gap: 7px; }
+    @media (max-width: 720px) { .trace-picker { grid-template-columns: 1fr; } .trace-summary { grid-column: auto; } }
     label, .label { color: var(--muted); font-size: .78rem; font-weight: 650; }
     input, select { min-height: 40px; border: 1px solid #bdc7d1; border-radius: 5px; background: white; padding: 8px 10px; }
     button { min-height: 40px; border: 1px solid #bdc7d1; border-radius: 5px; background: white; padding: 8px 12px; cursor: pointer; }
@@ -121,6 +128,27 @@
       <button id="previous-match" type="button" disabled aria-label="Previous search match">Previous</button>
       <button id="next-match" type="button" disabled aria-label="Next search match">Next</button>
     </section>
+    <section id="trace-picker" class="trace-picker" aria-label="Trace files" hidden>
+      <div class="control">
+        <label for="trace-select">Choose a trace</label>
+        <select id="trace-select" disabled aria-describedby="trace-summary"></select>
+      </div>
+      <div class="control">
+        <label for="trace-filter">Filter filenames <span class="hint">(* and ? wildcards)</span></label>
+        <input id="trace-filter" type="search" placeholder="e.g. release/*/trace-??.depx.json.gz" aria-describedby="trace-summary">
+      </div>
+      <div class="trace-filter-actions">
+        <button id="trace-filter-apply" type="button">Filter</button>
+        <button id="trace-filter-clear" type="button">Clear</button>
+        <button id="trace-load" class="primary" type="button" disabled>Load trace</button>
+      </div>
+      <div class="trace-pager" aria-label="Filtered trace pages">
+        <button id="trace-previous-page" type="button" disabled aria-label="Previous filename page">Previous</button>
+        <span id="trace-page-label" class="counter" aria-live="polite"></span>
+        <button id="trace-next-page" type="button" disabled aria-label="Next filename page">Next</button>
+      </div>
+      <p id="trace-summary" class="hint trace-summary" role="status" aria-live="polite">Loading trace filenames…</p>
+    </section>
     <div id="status" class="status" role="status" aria-live="polite">Choose a .depx.json or .depx.json.gz file to begin. The viewer runs offline; gzip support depends on your browser.</div>
 
     <section class="workspace" aria-label="Trace contents">
@@ -150,6 +178,7 @@
     const MAX_INPUT_BYTES = 128 * 1024 * 1024;
     const PAGE_SIZE = 500;
     const DEPENDENCY_PAGE_SIZE = 250;
+    const TRACE_PAGE_SIZE = 100;
     function buildVisibleModel(occurrences, matchingIndexes, expandedIndexes, filterActive, page, pageSize, collapsedIndexes = new Set()) {
       const hasMatchInSubtree = new Uint8Array(occurrences.length);
       const expanded = new Set(expandedIndexes);
@@ -207,13 +236,14 @@
       return [site.caller, site.target, site.callerPath, site.targetPath, occurrence.location, occurrence.status, statusLabel(occurrence.status)].join(" ").toLocaleLowerCase();
     }
     if (typeof document === "undefined") {
-       globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, readResponseFile, loadAutomaticTrace, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel, searchableText };
+       globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, readResponseFile, validateTraceCatalog, filterTraces, initializeTraceCatalog, wireTraceLauncherControls, loadRemoteTrace, loadLocalTrace, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel, searchableText };
       return;
     }
-    const state = { document: null, profile: null, allVisible: [], visible: [], matches: [], matchIndex: -1, selected: null, expanded: new Set(), collapsedSearchBranches: new Set(), rowByIndex: new Map(), treePage: 0, dependencyPage: 0, searchQuery: null };
-    const ui = {
-      input: document.getElementById("file-input"), open: document.getElementById("open-file"), status: document.getElementById("status"),
-      profileControl: document.getElementById("profile-control"), profile: document.getElementById("profile-select"),
+     const state = { document: null, profile: null, allVisible: [], visible: [], matches: [], matchIndex: -1, selected: null, expanded: new Set(), collapsedSearchBranches: new Set(), rowByIndex: new Map(), treePage: 0, dependencyPage: 0, searchQuery: null, traces: [], filteredTraces: [], tracePage: 0, traceGeneration: 0 };
+     const ui = {
+       input: document.getElementById("file-input"), open: document.getElementById("open-file"), status: document.getElementById("status"),
+       tracePicker: document.getElementById("trace-picker"), traceSelect: document.getElementById("trace-select"), traceFilter: document.getElementById("trace-filter"), traceFilterApply: document.getElementById("trace-filter-apply"), traceFilterClear: document.getElementById("trace-filter-clear"), traceLoad: document.getElementById("trace-load"), traceSummary: document.getElementById("trace-summary"), tracePreviousPage: document.getElementById("trace-previous-page"), traceNextPage: document.getElementById("trace-next-page"), tracePageLabel: document.getElementById("trace-page-label"),
+       profileControl: document.getElementById("profile-control"), profile: document.getElementById("profile-select"),
       search: document.getElementById("search-input"), prev: document.getElementById("previous-match"), next: document.getElementById("next-match"),
       tree: document.getElementById("tree"), summary: document.getElementById("occurrence-summary"), details: document.getElementById("details"),
       expand: document.getElementById("expand-all"), collapse: document.getElementById("collapse-all"),
@@ -433,18 +463,81 @@
       return new FileConstructor(chunks, filename, { type: "application/octet-stream" });
     }
 
-    async function loadAutomaticTrace({ protocol, hash, fetchTrace, FileConstructor, loadFile, reportError }) {
+    function validateTraceCatalog(catalog) {
+      if (!catalog || typeof catalog !== "object" || !Array.isArray(catalog.traces) || catalog.traces.length === 0) throw new Error("The trace catalog is empty or invalid.");
+      return catalog.traces.map((trace, index) => {
+        if (!trace || typeof trace !== "object" || trace.id !== String(index) || typeof trace.name !== "string" || !trace.name.length) throw new Error("The trace catalog contains an invalid trace entry.");
+        return { id: trace.id, name: trace.name };
+      });
+    }
+
+    function globExpression(pattern) {
+      let expression = "^";
+      for (const character of pattern) {
+        if (character === "*") expression += "[\\s\\S]*";
+        else if (character === "?") expression += "[\\s\\S]";
+        else expression += character.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+      }
+      return new RegExp(`${expression}$`);
+    }
+
+    function filterTraces(traces, pattern) {
+      if (!pattern) return traces;
+      const expression = globExpression(pattern);
+      return traces.filter((trace) => expression.test(trace.name));
+    }
+
+    async function initializeTraceCatalog({ protocol, fetchCatalog, loadTrace, onCatalog, onError, shouldAutoload = () => true }) {
       if (protocol !== "http:" && protocol !== "https:") return false;
-      const filename = new URLSearchParams(hash.replace(/^#/, "")).get("filename");
-      if (!filename) return false;
       try {
-        const response = await fetchTrace("trace");
-        const file = await readResponseFile(response, filename, FileConstructor);
-        await loadFile(file);
+        const response = await fetchCatalog("catalog");
+        if (!response.ok) throw new Error(`Could not load the trace catalog (HTTP ${response.status}).`);
+        const traces = validateTraceCatalog(await response.json());
+        onCatalog(traces);
+        if (traces.length === 1 && shouldAutoload()) await loadTrace(traces[0]);
       } catch (error) {
-        reportError(error instanceof Error ? error.message : "Unable to load this trace.");
+        onError(error instanceof Error ? error.message : "Unable to load the trace catalog.");
       }
       return true;
+    }
+
+    function wireTraceLauncherControls({ openButton, fileInput, traceLoadButton, traceSelect, selectRemoteTrace, onManualOpen }) {
+      openButton.addEventListener("click", () => { onManualOpen(); fileInput.click(); });
+      traceLoadButton.addEventListener("click", () => selectRemoteTrace());
+      traceSelect.addEventListener("change", () => { onManualOpen(); });
+    }
+
+    async function loadRemoteTrace({ trace, fetchTrace, FileConstructor, isCurrent, loadFile, reportError }) {
+      try {
+        const response = await fetchTrace(`trace/${trace.id}`);
+        if (!isCurrent()) return false;
+        if (!response.ok) throw new Error(`Could not load ${trace.name} (HTTP ${response.status}).`);
+        const declaredSize = Number(response.headers.get("content-length"));
+        if (Number.isFinite(declaredSize) && declaredSize > MAX_INPUT_BYTES) throw new Error("This file is larger than the 128 MiB safety limit. Use a smaller trace or split the output.");
+        if (!response.body) throw new Error("Could not load this trace because the browser cannot stream the response.");
+        const file = await readResponseFile(response, trace.name, FileConstructor);
+        if (!isCurrent()) return false;
+        await loadFile(file, isCurrent);
+        return true;
+      } catch (error) {
+        if (isCurrent()) reportError(error instanceof Error ? error.message : "Unable to load this trace.");
+        return false;
+      }
+    }
+
+    async function loadLocalTrace({ file, isCurrent, read, parse, install, reportError }) {
+      if (!file) return false;
+      try {
+        const text = await read(file);
+        if (!isCurrent()) return false;
+        const parsed = parse(text);
+        if (!isCurrent()) return false;
+        install(parsed, file.name);
+        return true;
+      } catch (error) {
+        if (isCurrent()) reportError(error instanceof Error ? error.message : "Unable to read this trace.");
+        return false;
+      }
     }
 
     function currentProfile() { return state.document && state.document.profiles.get(state.profile); }
@@ -618,24 +711,98 @@
       setStatus(`${next + 1} of ${state.matches.length} matches in profile “${profile.name}”.`);
     }
 
-    ui.open.addEventListener("click", () => ui.input.click());
-    async function loadFile(file) {
+     function installParsedDocument(parsed, filename) {
+      state.document = parsed; state.profile = parsed.profiles.keys().next().value; state.selected = parsed.profiles.get(state.profile).occurrences.length ? 0 : null;
+      ui.profile.replaceChildren();
+      for (const name of parsed.profiles.keys()) ui.profile.append(new Option(name, name));
+      ui.profileControl.hidden = parsed.profiles.size < 2;
+      ui.search.disabled = false; ui.expand.disabled = false; ui.collapse.disabled = false;
+      state.expanded = new Set(); ui.search.value = ""; render();
+      setStatus(`${filename}: depx JSON version ${parsed.version}; ${parsed.profiles.size} profile${parsed.profiles.size === 1 ? "" : "s"}, ${parsed.dependencies.length} dependencies.`);
+    }
+
+    async function loadFile(file, isCurrent = () => true) {
       if (!file) return;
       setStatus(`Reading ${file.name}…`);
+      return loadLocalTrace({
+        file,
+        isCurrent,
+        read: readFile,
+        parse: parseDepx,
+        install: installParsedDocument,
+        reportError: (message) => setStatus(message, true)
+      });
+    }
+    function renderTraceChoices() {
+      const start = state.tracePage * TRACE_PAGE_SIZE;
+      const pageTraces = state.filteredTraces.slice(start, start + TRACE_PAGE_SIZE);
+      const previousId = ui.traceSelect.value;
+      ui.traceSelect.replaceChildren();
+      for (const trace of pageTraces) {
+        const option = document.createElement("option");
+        option.value = trace.id;
+        option.textContent = trace.name;
+        ui.traceSelect.append(option);
+      }
+      if (pageTraces.some(({ id }) => id === previousId)) ui.traceSelect.value = previousId;
+      ui.traceSelect.disabled = pageTraces.length === 0;
+      ui.traceLoad.disabled = pageTraces.length === 0;
+      const total = state.traces.length;
+      const matches = state.filteredTraces.length;
+      ui.traceSummary.textContent = state.traceFilterError || `${matches.toLocaleString()} of ${total.toLocaleString()} filenames match${state.traceFilter.value ? ` “${ui.traceFilter.value}”` : ""}. Filename filtering uses case-sensitive * and ? wildcards; it does not search occurrences.`;
+      const pages = Math.max(1, Math.ceil(matches / TRACE_PAGE_SIZE));
+      ui.tracePreviousPage.parentElement.hidden = pages < 2;
+      ui.tracePreviousPage.disabled = state.tracePage === 0;
+      ui.traceNextPage.disabled = state.tracePage + 1 >= pages;
+      ui.tracePageLabel.textContent = matches ? `Names ${start + 1}–${Math.min(start + TRACE_PAGE_SIZE, matches)} of ${matches.toLocaleString()} · page ${state.tracePage + 1} of ${pages}` : "No filenames";
+    }
+
+    function applyTraceFilter() {
       try {
-        const parsed = parseDepx(await readFile(file));
-        state.document = parsed; state.profile = parsed.profiles.keys().next().value; state.selected = parsed.profiles.get(state.profile).occurrences.length ? 0 : null;
-        ui.profile.replaceChildren();
-        for (const name of parsed.profiles.keys()) ui.profile.append(new Option(name, name));
-        ui.profileControl.hidden = parsed.profiles.size < 2;
-        ui.search.disabled = false; ui.expand.disabled = false; ui.collapse.disabled = false;
-        state.expanded = new Set(); ui.search.value = ""; render();
-        setStatus(`${file.name}: depx JSON version ${parsed.version}; ${parsed.profiles.size} profile${parsed.profiles.size === 1 ? "" : "s"}, ${parsed.dependencies.length} dependencies.`);
-      } catch (error) {
-        showLoadError(error instanceof Error ? error.message : "Unable to read this trace.");
+        state.traceFilterError = "";
+        state.filteredTraces = filterTraces(state.traces, ui.traceFilter.value);
+        state.tracePage = 0;
+        renderTraceChoices();
+      } catch {
+        state.traceFilterError = "The filename filter could not be applied. Edit it or clear it to continue.";
+        renderTraceChoices();
       }
     }
-    ui.input.addEventListener("change", async () => loadFile(ui.input.files && ui.input.files[0]));
+
+    async function selectRemoteTrace(selectedTrace) {
+      const trace = selectedTrace || state.traces.find(({ id }) => id === ui.traceSelect.value);
+      if (!trace) return;
+      const generation = ++state.traceGeneration;
+      const isCurrent = () => generation === state.traceGeneration;
+      setStatus(`Loading ${trace.name}…`);
+      await loadRemoteTrace({
+        trace,
+        fetchTrace: (relativePath) => fetch(relativePath),
+        FileConstructor: File,
+        isCurrent,
+        loadFile,
+        reportError: (message) => setStatus(message, true)
+      });
+    }
+
+     wireTraceLauncherControls({
+       openButton: ui.open,
+       fileInput: ui.input,
+       traceLoadButton: ui.traceLoad,
+       traceSelect: ui.traceSelect,
+       selectRemoteTrace,
+       onManualOpen: () => { state.traceGeneration++; }
+     });
+    ui.input.addEventListener("change", async () => {
+      const generation = ++state.traceGeneration;
+      await loadFile(ui.input.files && ui.input.files[0], () => generation === state.traceGeneration);
+      ui.input.value = "";
+    });
+    ui.traceFilterApply.addEventListener("click", applyTraceFilter);
+    ui.traceFilter.addEventListener("keydown", (event) => { if (event.key === "Enter") { applyTraceFilter(); event.preventDefault(); } });
+    ui.traceFilterClear.addEventListener("click", () => { ui.traceFilter.value = ""; applyTraceFilter(); ui.traceFilter.focus(); });
+    ui.tracePreviousPage.addEventListener("click", () => { if (state.tracePage > 0) { state.tracePage--; renderTraceChoices(); } });
+    ui.traceNextPage.addEventListener("click", () => { if ((state.tracePage + 1) * TRACE_PAGE_SIZE < state.filteredTraces.length) { state.tracePage++; renderTraceChoices(); } });
     ui.profile.addEventListener("change", () => { state.profile = ui.profile.value; state.selected = currentProfile().occurrences.length ? 0 : null; state.expanded = new Set(); render(); setStatus(`Showing profile “${state.profile}”.`); });
     ui.search.addEventListener("input", () => { state.matchIndex = -1; render(); setStatus(state.matches.length ? `${state.matches.length} matching occurrence${state.matches.length === 1 ? "" : "s"}. Use Previous and Next to move through matches.` : "No matching occurrences."); });
     ui.search.addEventListener("keydown", (event) => { if (event.key === "Enter" && state.matches.length) { navigateMatch(event.shiftKey ? -1 : 1); event.preventDefault(); } });
@@ -646,15 +813,16 @@
        ui.collapse.addEventListener("click", () => { state.expanded.clear(); if (state.searchQuery) state.collapsedSearchBranches = new Set(currentProfile().occurrences.filter((item) => item.children.length).map((item) => item.index)); state.treePage = 0; render(); });
 
     // Export the parser for dependency-free node:test coverage in the offline test suite.
-       if (typeof globalThis !== "undefined") globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, readResponseFile, loadAutomaticTrace, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel };
-       void loadAutomaticTrace({
-         protocol: window.location.protocol,
-         hash: window.location.hash,
-         fetchTrace: (relativePath) => fetch(relativePath),
-         FileConstructor: File,
-         loadFile,
-         reportError: showLoadError
-       });
+       if (typeof globalThis !== "undefined") globalThis.DepxViewerParser = { parseDepx, resolvePath, readFile, readResponseFile, validateTraceCatalog, filterTraces, initializeTraceCatalog, wireTraceLauncherControls, loadRemoteTrace, loadLocalTrace, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel };
+       const catalogGeneration = state.traceGeneration;
+       void initializeTraceCatalog({
+          protocol: window.location.protocol,
+          fetchCatalog: (relativePath) => fetch(relativePath),
+          loadTrace: (trace) => selectRemoteTrace(trace),
+          shouldAutoload: () => state.traceGeneration === catalogGeneration,
+          onCatalog: (traces) => { state.traces = traces; state.filteredTraces = traces; ui.tracePicker.hidden = false; applyTraceFilter(); },
+          onError: (message) => setStatus(message, true)
+        });
   })();
   </script>
 </body>

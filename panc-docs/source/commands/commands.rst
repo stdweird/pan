@@ -289,15 +289,33 @@ Offline trace viewer
 --------------------
 
 Run ``depviewer path/to/profile.depx.json`` (or ``.depx.json.gz``) to open the
-viewer with the supplied trace already loaded. From a checkout, the launcher is
+viewer with the supplied trace already loaded. Supply multiple files,
+directories, or a mixture to browse a trace collection::
+
+    depviewer profile-a.depx.json.gz profile-b.depx.json.gz
+    depviewer /path/to/compiled/profiles
+
+Directories are searched recursively for ``.depx.json`` and ``.depx.json.gz``
+files without following directory symlinks. Duplicate file paths are listed
+once. With multiple traces, select a file to load it; only that trace is fetched
+and decompressed, not the entire collection. The inventory is collected at
+startup; restart the launcher to discover newly added files.
+
+Filter the trace list using a case-sensitive filename glob: ``*`` matches any
+number of characters and ``?`` matches one character, including path separators.
+An empty filter shows all files. Filename filtering is separate from searching
+occurrences inside a loaded trace and does not replace the loaded trace.
+
+From a checkout, the launcher is
 ``panc/src/main/scripts/depviewer/depviewer``; compiler bundles install it as
 ``bin/depviewer/depviewer``.
 It requires Python 3.9 or newer and ``xdg-open``. Its helper and
 ``depviewer.html`` must remain
 beside the launcher, but the command can run from any working directory.
 
-The launcher serves only the viewer and selected trace on a token-protected
-loopback address; it does not upload data or create a temporary trace copy.
+The launcher serves only the viewer, trace inventory and allowlisted traces on
+a token-protected loopback address; it does not upload data or create a temporary
+trace copy.
 Keep the command running while using the viewer, and press Ctrl+C to stop the
 server. Browser reloads require the server to remain running.
 

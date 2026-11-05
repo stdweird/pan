@@ -11,9 +11,32 @@ const htmlPath = path.join(__dirname, "..", "depviewer.html");
 const html = fs.readFileSync(htmlPath, "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 vm.runInThisContext(script, { filename: htmlPath });
-const { parseDepx, resolvePath, readFile, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel, searchableText } = globalThis.DepxViewerParser;
+const { parseDepx, resolvePath, readFile, buildVisibleModel, matchAt, moveRowSelection, dependencyPage, statusLabel, searchableText, validateTraceCatalog, filterTraces, initializeTraceCatalog, wireTraceLauncherControls, loadRemoteTrace, loadLocalTrace } = globalThis.DepxViewerParser;
 
 const location = { begin_line: 4, begin_column: 0, end_line: 4, end_column: 12 };
+
+test("streamed response without Content-Length exceeding 128 MiB cancels and releases the reader", async () => {
+  let reads = 0;
+  let cancelled = false;
+  let released = false;
+  const chunk = new Uint8Array(1024 * 1024);
+  const response = {
+    ok: true,
+    headers: { get: () => null },
+    body: { getReader: () => ({
+      read: async () => { reads++; return { done: false, value: chunk }; },
+      cancel: async () => { cancelled = true; },
+      releaseLock: () => { released = true; },
+    }) },
+  };
+
+  await assert.rejects(globalThis.DepxViewerParser.readResponseFile(response, "oversized.depx.json", class {
+    constructor() { assert.fail("oversized response must not create a file"); }
+  }), /128 MiB/);
+  assert.equal(reads, 129);
+  assert.equal(cancelled, true);
+  assert.equal(released, true);
+});
 const fixture = () => ({
   format: "depx",
   version: 1,
@@ -190,83 +213,208 @@ test("decompresses gzip JSON locally, enforces size limits, and reports invalid 
   await assert.rejects(readFile(file("invalid.json.gz", Buffer.from([0x1f, 0x8b, 0, 0]))), /decompress/);
 });
 
-test("automatically loads HTTP JSON and gzip traces through the shared file reader", async () => {
-  const json = JSON.stringify(fixture());
-  const cases = [
-    ["trace café.depx.json", Buffer.from(json)],
-    ["trace space.depx.json.gz", zlib.gzipSync(Buffer.from(json))]
-  ];
-  for (const [filename, bytes] of cases) {
-    let requestedPath;
-    let loadedDocument;
-    let reportedError;
-    class TestFile {
-      constructor(parts, name) {
-        this.name = name;
-        this.bytes = Buffer.concat(parts.map((part) => Buffer.from(part)));
-        this.size = this.bytes.length;
-      }
-      async arrayBuffer() { return this.bytes.buffer.slice(this.bytes.byteOffset, this.bytes.byteOffset + this.bytes.byteLength); }
-    }
-    const handled = await globalThis.DepxViewerParser.loadAutomaticTrace({
-      protocol: "http:",
-      hash: `#filename=${encodeURIComponent(filename)}`,
-      fetchTrace: async (relativePath) => {
-        requestedPath = relativePath;
-        return { ok: true, headers: { get: () => String(bytes.length) }, body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) };
-      },
-      FileConstructor: TestFile,
-      loadFile: async (file) => {
-        assert.equal(file.name, filename);
-        assert.deepEqual(file.bytes, bytes, "the fetched trace bytes are passed through unchanged");
-        loadedDocument = parseDepx(await readFile(file));
-      },
-      reportError: (message) => { reportedError = message; }
-    });
-    assert.equal(handled, true);
-    assert.equal(requestedPath, "trace");
-    assert.equal(loadedDocument.profiles.size, 1);
-    assert.equal(reportedError, undefined);
+test("validates catalog IDs and filters names with case-sensitive path globs", () => {
+  const traces = validateTraceCatalog({ traces: [
+    { id: "0", name: "builds/One.depx.json.gz" },
+    { id: "1", name: "builds/Two.depx.json" },
+    { id: "2", name: "other/one.depx.json" }
+  ] });
+  assert.equal(filterTraces(traces, "").length, 3);
+  assert.deepEqual(filterTraces(traces, "builds/*.depx.json.?z"), [traces[0]]);
+  assert.deepEqual(filterTraces(traces, "builds/One*").map(({ id }) => id), ["0"]);
+  assert.deepEqual(filterTraces(traces, "builds/one*").length, 0);
+  assert.deepEqual(filterTraces(traces, "builds/One.depx.json.gz").map(({ id }) => id), ["0"]);
+  assert.deepEqual(filterTraces(traces, "*/*.depx.json").map(({ id }) => id), ["1", "2"]);
+  assert.deepEqual(filterTraces([{ id: "0", name: "folder\ntrace" }], "folder?trace").length, 1);
+  for (const invalid of [null, {}, { traces: [{ id: "1", name: "x" }] }, { traces: [{ id: "0", name: "" }] }]) {
+    assert.throws(() => validateTraceCatalog(invalid), /catalog|trace/i);
   }
+  const hostileName = '<img src=x onerror="alert(1)">.depx.json';
+  assert.equal(validateTraceCatalog({ traces: [{ id: "0", name: hostileName }] })[0].name, hostileName);
+  assert.match(html, /option\.textContent|new Option\(/);
+  assert.doesNotMatch(html, /innerHTML\s*=/);
 });
 
-test("HTTP autoload errors are reported, declared oversize is rejected before reading, and file URLs do not fetch", async () => {
-  let fetchCalls = 0;
+test("filters large catalogs in memory while rendering can remain bounded", () => {
+  const traces = Array.from({ length: 5000 }, (_, index) => ({ id: String(index), name: `production/${index}.depx.json.gz` }));
+  assert.equal(filterTraces(traces, "production/49??.depx.json.gz").length, 100);
+  assert.match(html, /TRACE_PAGE_SIZE\s*=\s*100/);
+  assert.match(html, /slice\(.*TRACE_PAGE_SIZE/s);
+  assert.match(html, /option\.textContent = trace\.name/);
+});
+
+test("autoloads one HTTP catalog trace but leaves multi-trace catalogs idle", async () => {
+  const json = JSON.stringify(fixture());
+  const cases = [
+    { traces: [{ id: "0", name: "trace café.depx.json" }] },
+    { traces: [{ id: "0", name: "trace café.depx.json" }, { id: "1", name: "trace space.depx.json.gz" }] }
+  ];
+  for (const [index, catalog] of cases.entries()) {
+    let requestedPath;
+    let loaded = 0;
+    const handled = await initializeTraceCatalog({
+      protocol: "http:",
+      fetchCatalog: async () => ({ ok: true, json: async () => catalog }),
+      loadTrace: async (trace) => {
+        loaded++;
+        const bytes = index === 0 ? Buffer.from(json) : zlib.gzipSync(Buffer.from(json));
+        const file = await loadRemoteTrace({
+          trace,
+          fetchTrace: async (relativePath) => {
+            requestedPath = relativePath;
+            return { ok: true, headers: { get: () => String(bytes.length) }, body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) };
+          },
+          FileConstructor: class TestFile {
+            constructor(parts, name) { this.name = name; this.bytes = Buffer.concat(parts.map((part) => Buffer.from(part))); this.size = this.bytes.length; }
+            async arrayBuffer() { return this.bytes.buffer.slice(this.bytes.byteOffset, this.bytes.byteOffset + this.bytes.byteLength); }
+          },
+          isCurrent: () => true,
+          loadFile: async (file) => assert.equal(parseDepx(await readFile(file)).profiles.size, 1),
+          reportError: (error) => assert.fail(error)
+        });
+        assert.equal(file, true);
+      },
+      onCatalog: () => {},
+      onError: (error) => assert.fail(error)
+    });
+    assert.equal(handled, true);
+    assert.equal(loaded, index === 0 ? 1 : 0);
+    assert.equal(requestedPath, index === 0 ? "trace/0" : undefined);
+  }
+  let fetches = 0;
+  assert.equal(await initializeTraceCatalog({ protocol: "file:", fetchCatalog: async () => { fetches++; }, loadTrace: () => {}, onCatalog: () => {}, onError: () => {} }), false);
+  assert.equal(fetches, 0, "standalone file pages do not fetch a catalog");
+});
+
+test("catalog and selected-trace errors are reported and oversized responses are rejected", async () => {
   const errors = [];
-  const options = {
-    protocol: "http:", hash: "#filename=trace.depx.json", FileConstructor: class TestFile {},
-    loadFile: async () => assert.fail("a failed automatic load must not reach the file reader"),
-    reportError: (message) => errors.push(message)
-  };
-  await globalThis.DepxViewerParser.loadAutomaticTrace({
-    ...options,
-    fetchTrace: async () => { fetchCalls++; throw new Error("offline"); }
+  await initializeTraceCatalog({
+    protocol: "http:", fetchCatalog: async () => { throw new Error("offline"); },
+    loadTrace: async () => {}, onCatalog: () => {}, onError: (message) => errors.push(message)
   });
   assert.match(errors[0], /offline/);
-  await globalThis.DepxViewerParser.loadAutomaticTrace({
-    ...options,
-    fetchTrace: async () => ({ ok: true, headers: { get: () => String(128 * 1024 * 1024 + 1) }, body: { getReader: () => assert.fail("oversize body must not be read") } })
+  await loadRemoteTrace({
+    trace: { id: "0", name: "trace.depx.json" }, FileConstructor: class TestFile {}, isCurrent: () => true,
+    fetchTrace: async () => ({ ok: true, headers: { get: () => String(128 * 1024 * 1024 + 1) }, body: { getReader: () => assert.fail("oversize body must not be read") } }),
+    loadFile: async () => assert.fail("oversize trace must not reach the parser"), reportError: (message) => errors.push(message)
   });
   assert.match(errors[1], /128 MiB/);
-  let streamCanceled = false;
-  await globalThis.DepxViewerParser.loadAutomaticTrace({
-    ...options,
-    fetchTrace: async () => ({
-      ok: true, headers: { get: () => null },
-      body: { getReader: () => ({
-        read: async () => ({ done: false, value: new Uint8Array(128 * 1024 * 1024 + 1) }),
-        cancel: async () => { streamCanceled = true; },
-        releaseLock: () => {}
-      }) }
-    })
+  await initializeTraceCatalog({ protocol: "http:", fetchCatalog: async () => ({ ok: true, json: async () => ({ traces: [{ id: "9", name: "bad" }] }) }), loadTrace: async () => {}, onCatalog: () => {}, onError: (message) => errors.push(message) });
+  assert.match(errors[2], /catalog/i);
+});
+
+test("stale remote responses cannot start parsing after a newer or manual choice", async () => {
+  const pending = [];
+  const loaded = [];
+  let generation = 0;
+  const select = (id) => {
+    const requestGeneration = ++generation;
+    return loadRemoteTrace({
+      trace: { id, name: `${id}.depx.json` }, isCurrent: () => generation === requestGeneration,
+      fetchTrace: () => new Promise((resolve) => pending.push({ id, resolve })),
+      FileConstructor: class TestFile { constructor(parts, name) { this.name = name; this.parts = parts; } },
+      loadFile: async (file, isCurrent) => { if (isCurrent()) loaded.push(file.name); }, reportError: (error) => assert.fail(error)
+    });
+  };
+  const first = select("0");
+  const second = select("1");
+  const response = (name) => ({ ok: true, headers: { get: () => null }, body: new ReadableStream({ start(controller) { controller.enqueue(Buffer.from(name)); controller.close(); } }) });
+  pending[1].resolve(response("new"));
+  await second;
+  pending[0].resolve(response("old"));
+  await first;
+  assert.deepEqual(loaded, ["1.depx.json"]);
+  const third = select("2");
+  generation++; // A manual file selection invalidates a pending remote response.
+  pending[2].resolve(response("remote"));
+  await third;
+  assert.deepEqual(loaded, ["1.depx.json"]);
+});
+
+test("manual local loading invalidates remote work and failed replacement retains the installed model", async () => {
+  let generation = 0;
+  let installed = { name: "existing trace" };
+  const remoteResults = [];
+  const pending = [];
+  const remoteGeneration = ++generation;
+  const remoteLoad = loadRemoteTrace({
+    trace: { id: "0", name: "remote.depx.json" }, isCurrent: () => generation === remoteGeneration,
+    fetchTrace: () => new Promise((resolve) => pending.push(resolve)),
+    FileConstructor: class TestFile {},
+    loadFile: async () => remoteResults.push("installed"), reportError: (error) => assert.fail(error)
   });
-  assert.equal(streamCanceled, true);
-  assert.match(errors[2], /128 MiB/);
-  const handled = await globalThis.DepxViewerParser.loadAutomaticTrace({
-    ...options, protocol: "file:", fetchTrace: async () => { fetchCalls++; }
+
+  const localGeneration = ++generation;
+  const localResult = await loadLocalTrace({
+    file: { name: "manual.depx.json" }, isCurrent: () => generation === localGeneration,
+    read: async () => "valid", parse: (text) => ({ text }),
+    install: (document, name) => { installed = { document, name }; }, reportError: (error) => assert.fail(error)
   });
-  assert.equal(handled, false);
-  assert.equal(fetchCalls, 1);
+  assert.equal(localResult, true);
+  assert.equal(installed.name, "manual.depx.json");
+
+  pending[0]({ ok: true, headers: { get: () => null }, body: new ReadableStream({ start(controller) { controller.close(); } }) });
+  await remoteLoad;
+  assert.deepEqual(remoteResults, []);
+
+  const priorModel = installed;
+  const failureMessages = [];
+  const failedResult = await loadLocalTrace({
+    file: { name: "bad.depx.json" }, isCurrent: () => true,
+    read: async () => "invalid", parse: () => { throw new Error("invalid depx document"); },
+    install: (document, name) => { installed = { document, name }; }, reportError: (message) => failureMessages.push(message)
+  });
+  assert.equal(failedResult, false);
+  assert.equal(installed, priorModel, "a failed replacement does not release or clear the displayed trace");
+  assert.deepEqual(failureMessages, ["invalid depx document"]);
+});
+
+test("launcher controls invoke selection once without passing click events as traces", () => {
+  class FakeButton {
+    listeners = new Map();
+    addEventListener(type, callback) { this.listeners.set(type, callback); }
+    click() { this.listeners.get("click")({ type: "click" }); }
+  }
+  const openButton = new FakeButton();
+  const fileInput = { clickCount: 0, click() { this.clickCount++; } };
+  const traceLoadButton = new FakeButton();
+  const traceSelect = new FakeButton();
+  let manualOpens = 0;
+  let traceSelections = 0;
+  let receivedArguments = -1;
+  wireTraceLauncherControls({
+    openButton, fileInput, traceLoadButton, traceSelect,
+    selectRemoteTrace(...args) { traceSelections++; receivedArguments = args.length; },
+    onManualOpen() { manualOpens++; }
+  });
+
+  openButton.click();
+  openButton.click();
+  assert.equal(manualOpens, 2, "each manual open click invalidates pending catalog or trace loads exactly once");
+  assert.equal(fileInput.clickCount, 2, "manual open dispatches exactly one file-picker click each time");
+  traceLoadButton.click();
+  assert.equal(traceSelections, 1);
+  assert.equal(receivedArguments, 0, "the DOM click event is not mistaken for a selected trace");
+  traceSelect.listeners.get("change")({ type: "change" });
+  assert.equal(manualOpens, 3, "changing the selected filename invalidates in-flight loads");
+});
+
+test("a one-file catalog arriving after manual selection does not autoload over it", async () => {
+  let resolveCatalog;
+  let manualSelectionGeneration = 0;
+  let automaticLoads = 0;
+  const catalogLoad = initializeTraceCatalog({
+    protocol: "http:",
+    fetchCatalog: () => new Promise((resolve) => { resolveCatalog = resolve; }),
+    loadTrace: async () => { automaticLoads++; },
+    onCatalog: () => {},
+    onError: (error) => assert.fail(error),
+    shouldAutoload: () => manualSelectionGeneration === 0
+  });
+  manualSelectionGeneration++;
+  resolveCatalog({ ok: true, json: async () => ({ traces: [{ id: "0", name: "relative/path.depx.json" }] }) });
+  await catalogLoad;
+  assert.equal(automaticLoads, 0, "catalog initialization respects a newer manual open/selection");
 });
 
 test("consumes compiler-generated depx JSON and matching gzip output", async (t) => {
