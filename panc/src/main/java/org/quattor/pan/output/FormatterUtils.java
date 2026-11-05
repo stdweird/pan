@@ -25,7 +25,8 @@ public class FormatterUtils {
 				PanFormatter.getInstance(), PanGzipFormatter.getInstance(),
 				XmlFormatter.getInstance(), XmlGzipFormatter.getInstance(),
 				JsonFormatter.getInstance(), JsonGzipFormatter.getInstance(),
-                NullFormatter.getInstance(), DepxFormatter.getInstance(), DepxGzipFormatter.getInstance()};
+                NullFormatter.getInstance(), DepxFormatter.getInstance(), DepxGzipFormatter.getInstance(),
+                DepxJsonFormatter.getInstance(), DepxJsonGzipFormatter.getInstance()};
 
 		// Insert the values, letting the instances choose their key values.
 		// Ensure that the values are in lowercase.

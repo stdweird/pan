@@ -13,6 +13,8 @@
             DepFormatter
             DepxFormatter
             DepxGzipFormatter
+            DepxJsonFormatter
+            DepxJsonGzipFormatter
             DepGzipFormatter
             NullFormatter]
            [org.quattor.pan CompilerOptions$DeprecationWarnings]
@@ -42,6 +44,8 @@
             "dep" (conj v (DepFormatter/getInstance))
             "depx" (conj v (DepxFormatter/getInstance))
             "depx.gz" (conj v (DepxGzipFormatter/getInstance))
+            "depx.json" (conj v (DepxJsonFormatter/getInstance))
+            "depx.json.gz" (conj v (DepxJsonGzipFormatter/getInstance))
             "dep.gz" (conj v (DepGzipFormatter/getInstance))
             "null" (conj v (NullFormatter/getInstance))
             "none" v

@@ -499,6 +499,10 @@ public class CompilerOptions {
                 formatters.add(DepxFormatter.getInstance());
             } else if ("depx.gz".equals(fname)) {
                 formatters.add(DepxGzipFormatter.getInstance());
+            } else if ("depx.json".equals(fname)) {
+                formatters.add(org.quattor.pan.output.DepxJsonFormatter.getInstance());
+            } else if ("depx.json.gz".equals(fname)) {
+                formatters.add(org.quattor.pan.output.DepxJsonGzipFormatter.getInstance());
             } else if ("dep.gz".equals(fname)) {
                 formatters.add(DepGzipFormatter.getInstance());
             } else if ("null".equals(fname)) {
